@@ -1,7 +1,7 @@
 import numpy as np, argparse
 from enlib import enmap, curvedsky, powspec, bunch, coordinates, utils, bench
 parser = argparse.ArgumentParser()
-#parser.add_argument("template")
+parser.add_argument("sky_map")
 #parser.add_argument("powspec")
 #parser.add_argument("omap")
 parser.add_argument("-T", type=float, default=2.7260)
@@ -51,7 +51,9 @@ class ScanGenerator:
 		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
 		return bunch.Bunch(t=t, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, delay=ang_delay)
 	def gen_pointing(self, oparam):
-		"""Use orbital positions into pointing and orientation on the sky."""
+		"""Use orbital positions into pointing and orientation on the sky.
+		Returns a bunch(point[{phi,theta},nhorn,ntime], gamma[nhorn,ntime], delay[ntime])
+		"""
 		# First set up the part of the pointing matrix that is common for all the
 		# detectors. This consists of the rotation from the spin axis, to scan,
 		# to orbit, but does not include the barrel.
@@ -81,7 +83,7 @@ class ScanGenerator:
 		return bunch.Bunch(point=point, gamma=gamma, delay=delay)
 	def gen_det_resp(self, point):
 		"""Compute the on-sky T,Q,U sensitivity of each detector for each pointing.
-		Will be [t,ndet,{0,delay},nbarrel,{T,Q,U}] because every detector gets contributions from
+		Will be [ndet,{0,delay},nbarrel,{T,Q,U},t] because every detector gets contributions from
 		every barrel."""
 		# Power incident on x and y-oriented detectors in the A and B horns.
 		# Pax = 1/4*(Ia+Ib+Qa-Qb)[0] + 1/4*(Ia-Ib+Qa+Qb)[delta]
@@ -110,34 +112,34 @@ class ScanGenerator:
 				[[ u, c1, s1],[ u,-c2,-s2]],
 				[[ u, c1, s1],[-u, c2, s2]]])
 		return res
-	#def gen_optics(self):
-	#	"""Compute the effect of the telescope polarization filters and mirrors.
-	#	Follows vertial and horizontal polarization from each barrel through the
-	#	optics until the detectors. Returns the mapping from incoming radiation
-	#	in each barrel to incoming radiation in each feedhorn separately for
-	#	the radiation on each side of the moving mirror. The total transfer
-	#	matrix will be a linear combination of these based on the stroke.
-	#	
-	#	Returns [mirror side,{barrel A, barrel B}*{hor,vert}]
-	#	"""
-	#	# Basis is [Ah,Av,Bh,Bv], where A and B are the two horns, and h and v
-	#	# are the two polarization directions.
-	#	# Transmits vertial, so vertial moves to the other horn
-	#	# could be more compactly, but less readably, written as roll(eye(4)[::-1],1,0)
-	#	Mf = np.array([
-	#		[1,0,0,0],
-	#		[0,0,0,1],
-	#		[0,0,1,0],
-	#		[0,1,0,0]])
-	#	# Rotation from + to x basis
-	#	Mr = 2**-0.5*np.array([
-	#		[ 1, 1, 0, 0],
-	#		[-1, 1, 0, 0],
-	#		[ 0, 0, 1, 1],
-	#		[ 0, 0,-1, 1]])
-	#	Mpre = Mf.dot(Mr.dot(Mf))
-	#	res = np.einsum("ij,aj,jk->aik", Mpre.T, [[1,1,0,0],[0,0,1,1]], Mpre)
-	#	return res
+	def gen_pixels(self, point, wcs_pos, wcs_delay, off=0.5):
+		nbarrel, _, ntime = point.point.shape
+		pix = np.zeros([4,nbarrel,ntime])
+		pix[:2] = np.array(wcs_pos.wcs_world2pix(point.point.T.reshape(-1,2), 0)).T.reshape(point.point.shape)+off
+		pix[2]  = wcs_delay.wcs_world2pix([0], 0)[0][0]+off
+		pix[3]  = wcs_delay.wcs_world2pix(point.delay, 0)+off
+		return pix
+	def gen_signal(self, sky, pix, resp, order=3):
+		"""Generates a simulated sky singla by evaluating the given sky map
+		at the given positions with each detectors response using interpolation
+		of the given order. Returns signal[ndet,ntime]."""
+		# First evaluate the sky at each barrels position, both for our
+		# delay and 0 delay.
+		# Since sky is [{T,Q,U},ndelay,y,x], sig_barrel will be [{T,Q,U},nbarrel,ntime]
+		sig_barrel_delay = utils.interpol(sky, pix[:3],      order=order, mode="constant", mask_nan=False)
+		sig_barrel_dc    = utils.interpol(sky, pix[[0,1,3]], order=order, mode="constant", mask_nan=False)
+		# resp[ndet,{0,delay},nbarrel,{T,Q,U},ntime] tells us how to turn the
+		# barrel signals into detector outputs
+		sig_det_delay = np.einsum("dbct,cbt->dt", resp[:,0], sig_barrel_delay)
+		sig_det_dc    = np.einsum("dbct,cbt->dt", resp[:,0], sig_barrel_dc)
+		sig_tot = sig_det_dc + sig_det_delay
+		return sig_tot
+
+# Read our sky cube, which should be [{T,Q,U},ndelay,y,x]
+sky = enmap.read_map(args.sky_map)
+# Read the extra delay wcs information
+
+
 
 sgen = ScanGenerator()
 with bench.show("orbit"):
@@ -146,56 +148,8 @@ with bench.show("point"):
 	point  = sgen.gen_pointing(oparam)
 with bench.show("resp"):
 	resp   = sgen.gen_det_resp(point)
-
-np.savetxt("foo.txt", point.point[0].T)
-
-#
-#
-#
-#def deproject(a, b):
-#	a = np.asarray(a)
-#	return a - a*np.sum(a*b,axis=-1)[...,None]
-#
-#def generate_pointing(scan_params, t0, nsamp):
-#	t = t0 + np.arange(nsamp)*scan_params.sample_period
-#	toff = t - scan_params.ref_ctime
-#	ang_orbit = scan_params.orbit_phase   + 2*np.pi*toff/scan_params.orbit_period
-#	ang_scan  = scan_params.scan_phase    + 2*np.pi*toff/scan_params.scan_period
-#	ang_spin  = scan_params.spin_phase    + 2*np.pi*toff/scan_params.spin_period
-#	ang_delay = scan_params.delay_phase   + 2*np.pi*toff/scan_params.delay_period
-#	delay = scan_params.delay_amp * np.sin(ang_delay)
-#
-#	# Our pointing is given by a series of rotations:
-#	# 1. Rotate the horn away from the spin axis
-#	#    Rzyz(horn_phi,horn_theta,ang_spin)
-#	# 2. Rotate the spin axis to its position in the scan
-#	#    Rzyz(ang_scan,opening_angle,0)
-#	# 3. Rotate the scan axis to its position along the orbit
-#	#    Rzyz(ang_orbit, 0, 0)
-#	# The #3 can be combined with #2.
-#	R_horn = coordinates.euler_mat(scan_params.horn_offs.T)
-#	R_rest = coordinates.euler_mat([
-#		ang_scan,
-#		np.repeat(scan_params.opening_angle,nsamp),
-#		ang_orbit])
-#	vecs = np.array([[0,0,1],[1,0,0]])
-#	pointing = np.einsum("tij,hvj->htvi", R_rest,
-#			np.einsum("hij,vj->hvi", R_horn, vecs))
-#	# The result is [horn,time,vec,{x,y,z}].
-#	# Construct tangent coordinate system, and recover polarization angle.
-#	# This could be more elegant.
-#	z_vec, oldx_vec = np.rollaxis(pointing,2)
-#	x_vec = deproject([0,0,1], z_vec)
-#	y_vec = -np.cross(x_vec, z_vec)
-#	psi_ang = np.arctan2(np.sum(oldx_vec*y_vec,-1), np.sum(oldx_vec*x_vec,-1))
-#	# Convert the boresight into spherical coordiantes. This
-#	# represents this barrel's pointing. We specify zenith=False
-#	# to get angles counting up from the equator. These will
-#	# correpond to equatorial heliocentric [horn,time,{b,l}]
-#	print z_vec
-#	z_ang = utils.rect2ang(z_vec.T, zenith=False).T
-#
-#	return bunch.Bunch(toff=toff, point=z_ang, psi=psi_ang, delay=delay)
-#
-#pointing = generate_pointing(scan_params, scan_params.ref_ctime, 10000)
-#print pointing
+	print resp.shape
+with bench.show("pixels"):
+	wcs_pos   = enmap.enlib.wcs.WCS(naxis=2)
+	wcs_delay = enmap.enlib.wcs.WCS(naxis=1)
+	pix    = sgen.gen_pixels(point, wcs_pos, wcs_delay)
