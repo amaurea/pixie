@@ -1,16 +1,14 @@
-import numpy as np, argparse
+import numpy as np, argparse, astropy.io.fits, pixutils, h5py
 from enlib import enmap, curvedsky, powspec, bunch, coordinates, utils, bench
 parser = argparse.ArgumentParser()
 parser.add_argument("sky_map")
-#parser.add_argument("powspec")
-#parser.add_argument("omap")
 parser.add_argument("-T", type=float, default=2.7260)
 parser.add_argument("--dfreq", type=float, default=15)
 parser.add_argument("--nbin",  type=float, default=400)
 parser.add_argument("--mirror",type=float, default=0.5)
+parser.add_argument("-I", "--interpol", type=int, default=3)
 args = parser.parse_args()
 
-#template = enmap.read_map(args.template)
 def rmul(R, a): return np.einsum("...ij,...jk->...ik",a,R)
 def rmat(ax, ang): return utils.rotmatrix(ang, ax)
 def rot(a, ax, ang): return rmul(rmat(ax,ang),a)
@@ -45,10 +43,14 @@ class ScanGenerator:
 	def gen_orbit(self, i0=0, n=100000, step=1):
 		"""Generate our orbital positions. These are needed to compute the pointing."""
 		t = (np.arange(n)*step + i0)*self.sample_period
+		print t
 		ang_orbit = self.orbit_phase   + 2*np.pi*np.floor(t/self.orbit_step)*self.orbit_step/self.orbit_period
 		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
 		ang_spin  = self.spin_phase    + 2*np.pi*t/self.spin_period
 		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
+		print "moo"
+		#ang_spin[:] = 0
+		ang_delay[:] = 0
 		return bunch.Bunch(t=t, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, delay=ang_delay)
 	def gen_pointing(self, oparam):
 		"""Use orbital positions into pointing and orientation on the sky.
@@ -80,7 +82,7 @@ class ScanGenerator:
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
 		# And the delay at each time
 		delay = self.delay_amp * np.sin(oparam.delay)
-		return bunch.Bunch(point=point, gamma=gamma, delay=delay)
+		return bunch.Bunch(point=point, gamma=gamma, delay=delay, pos=zvec)
 	def gen_det_resp(self, point):
 		"""Compute the on-sky T,Q,U sensitivity of each detector for each pointing.
 		Will be [ndet,{0,delay},nbarrel,{T,Q,U},t] because every detector gets contributions from
@@ -112,44 +114,55 @@ class ScanGenerator:
 				[[ u, c1, s1],[ u,-c2,-s2]],
 				[[ u, c1, s1],[-u, c2, s2]]])
 		return res
-	def gen_pixels(self, point, wcs_pos, wcs_delay, off=0.5):
+	def gen_pixels(self, point, wcs_pos, wcs_delay):
 		nbarrel, _, ntime = point.point.shape
 		pix = np.zeros([4,nbarrel,ntime])
-		pix[:2] = np.array(wcs_pos.wcs_world2pix(point.point.T.reshape(-1,2), 0)).T.reshape(point.point.shape)+off
-		pix[2]  = wcs_delay.wcs_world2pix([0], 0)[0][0]+off
-		pix[3]  = wcs_delay.wcs_world2pix(point.delay, 0)+off
+		pdeg = point.point / utils.degree
+		pix[0]  = wcs_delay.wcs_world2pix(np.abs(point.delay), 1)[0]
+		pix[1]  = wcs_delay.wcs_world2pix([0], 1)[0]
+		pix[3:1:-1] = np.array(wcs_pos.wcs_world2pix(pdeg.T.reshape(-1,2), 0)).T.reshape(point.point.shape) + 0.5
 		return pix
 	def gen_signal(self, sky, pix, resp, order=3):
 		"""Generates a simulated sky singla by evaluating the given sky map
 		at the given positions with each detectors response using interpolation
 		of the given order. Returns signal[ndet,ntime]."""
-		# First evaluate the sky at each barrels position, both for our
-		# delay and 0 delay.
+		# First evaluate the sky at each barrels position, both for our delay and 0 delay.
 		# Since sky is [{T,Q,U},ndelay,y,x], sig_barrel will be [{T,Q,U},nbarrel,ntime]
-		sig_barrel_delay = utils.interpol(sky, pix[:3],      order=order, mode="constant", mask_nan=False)
-		sig_barrel_dc    = utils.interpol(sky, pix[[0,1,3]], order=order, mode="constant", mask_nan=False)
+		sig_barrel_dc    = utils.interpol(sky, pix[1:],      order=order, mode="constant", mask_nan=False, prefilter=False)
+		sig_barrel_delay = utils.interpol(sky, pix[[0,2,3]], order=order, mode="constant", mask_nan=False, prefilter=False)
+		print pix[[0,2,3]]
+		print sky.shape
+		return sig_barrel_delay
 		# resp[ndet,{0,delay},nbarrel,{T,Q,U},ntime] tells us how to turn the
 		# barrel signals into detector outputs
-		sig_det_delay = np.einsum("dbct,cbt->dt", resp[:,0], sig_barrel_delay)
 		sig_det_dc    = np.einsum("dbct,cbt->dt", resp[:,0], sig_barrel_dc)
-		sig_tot = sig_det_dc + sig_det_delay
+		sig_det_delay = np.einsum("dbct,cbt->dt", resp[:,0], sig_barrel_delay)
+		sig_tot = sig_det_dc*0 + sig_det_delay
 		return sig_tot
 
-# Read our sky cube, which should be [{T,Q,U},ndelay,y,x]
-sky = enmap.read_map(args.sky_map)
-# Read the extra delay wcs information
-
-
+order = args.interpol
+with bench.show("read"):
+	# Read our sky cube, which should be [{T,Q,U},ndelay,y,x]
+	sky, spec_wcs = pixutils.read_map(args.sky_map)
+with bench.show("prefilter"):
+	# Prefilter to make interpolation faster
+	if order > 1: sky = utils.interpol_prefilter(sky, order)
 
 sgen = ScanGenerator()
 with bench.show("orbit"):
-	oparam = sgen.gen_orbit(step=10000, n=10000)
+	oparam = sgen.gen_orbit(step=5, n=100000, i0=1900000)
 with bench.show("point"):
 	point  = sgen.gen_pointing(oparam)
 with bench.show("resp"):
 	resp   = sgen.gen_det_resp(point)
-	print resp.shape
 with bench.show("pixels"):
-	wcs_pos   = enmap.enlib.wcs.WCS(naxis=2)
-	wcs_delay = enmap.enlib.wcs.WCS(naxis=1)
-	pix    = sgen.gen_pixels(point, wcs_pos, wcs_delay)
+	pix    = sgen.gen_pixels(point, sky.wcs, spec_wcs)
+with bench.show("signal"):
+	signal = sgen.gen_signal(sky, pix, resp, order=order)
+
+with h5py.File("foo.hdf","w") as hfile:
+	hfile["point"] = point.point
+	hfile["pos"]   = point.pos
+	hfile["gamma"] = point.gamma
+	hfile["tod"]   = signal
+	hfile["pix"]   = pix
