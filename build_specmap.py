@@ -7,6 +7,7 @@ parser.add_argument("-n", "--nfreq",  type=int,   default=512)
 parser.add_argument("-F", "--fmax",   type=float, default=6e12)
 parser.add_argument("-b", "--blocksize", type=int, default=16)
 parser.add_argument("-u", "--ounit",  type=float, default=1e-20)
+parser.add_argument("-D", "--delaymap", action="store_true")
 args = parser.parse_args()
 
 nfreq = args.nfreq
@@ -51,6 +52,10 @@ for idesc in args.idescs:
 		for f1,f2 in fblocks:
 			ospec[f1:f2] += scale[f1:f2,None,None,None] * m[None,:,:,:]
 ospec /= ounit
+
+if args.delaymap:
+	# Go from spectrum to delay (spectrogram)
+	ospec, spec_wcs = pixutils.spec2delay(ospec, spec_wcs, axis=0)
 
 # Reorder to TQU,freq,y,x
 ospec = np.rollaxis(ospec,1)
