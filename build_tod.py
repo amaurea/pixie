@@ -6,6 +6,7 @@ parser.add_argument("ofile")
 parser.add_argument("-i", "--scan",     type=float, default=0)
 parser.add_argument("-b", "--nscan",    type=float, default=1)
 parser.add_argument("-s", "--step",     type=int,   default=1)
+parser.add_argument("-O", "--oversample",type=int, default=4)
 parser.add_argument("-I", "--interpol", type=int, default=3,
 	help="""Interpolation order to use when looking up samples in the map. Orders
 	higher than 1 (linear) require a slow one-time prefiltering of the map.
@@ -43,14 +44,35 @@ class ScanGenerator:
 		self.orbit_step    = self.scan_period
 		self.ref_ctime     = 1500000000
 		self.sample_period = 1/256.0
-	def gen_orbit(self, i0=0, n=100000, step=1):
+	def gen_orbit(self, i0=0, n=100000, step=1, oversample=1):
 		"""Generate our orbital positions. These are needed to compute the pointing."""
-		t = (np.arange(n)*step + i0)*self.sample_period
+		i_base  = np.arange(n)*step + i0
+		mode = "plain"
+		if oversample == 1:
+			off, weights = np.array([0.0]), np.array([1.0])
+		else:
+			if mode == "gauss":
+				off, weights = np.polynomial.legendre.leggauss(oversample)
+				# Go from [-1,1] to [-0.5,0.5]
+				off /= 2
+				weights /= 2
+			elif mode == "plain":
+				off = 0.5*((2*np.arange(oversample)+1)/float(oversample)-1)
+				weights = np.full(oversample,1.0)/float(oversample)
+			elif mode == "trapezoidal":
+				off = np.arange(oversample)/float(oversample-1)-0.5
+				weights = np.concatenate([[1],np.full(oversample-2,2.0),[1]])/(2.0*(oversample-1))
+			elif mode == "simpson":
+				oversample = oversample/2*2+1
+				off = np.arange(oversample)/float(oversample-1)-0.5
+				weights = np.concatenate([[1],((1+np.arange(oversample-2))%2+1)*2,[1]])/(3.0*(oversample-1))
+				print off, weights
+		t = (i_base[:,None] + off[None,:]).reshape(-1) * self.sample_period
 		ang_orbit = self.orbit_phase   + 2*np.pi*np.floor(t/self.orbit_step)*self.orbit_step/self.orbit_period
 		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
 		ang_spin  = self.spin_phase    + 2*np.pi*t/self.spin_period
 		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
-		return bunch.Bunch(t=t, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, delay=ang_delay)
+		return bunch.Bunch(t=t, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, delay=ang_delay, weights=weights)
 	def gen_pointing(self, oparam):
 		"""Use orbital positions into pointing and orientation on the sky.
 		Returns a bunch(point[{phi,theta},nhorn,ntime], gamma[nhorn,ntime], delay[ntime])
@@ -152,7 +174,7 @@ sgen = ScanGenerator()
 with bench.show("orbit"):
 	offset = int(sgen.scan_period/sgen.sample_period * args.scan)
 	num    = int(sgen.scan_period/sgen.sample_period * args.nscan)
-	oparam = sgen.gen_orbit(i0=offset, n=num, step=args.step)
+	oparam = sgen.gen_orbit(i0=offset, n=num, step=args.step, oversample=args.oversample)
 with bench.show("point"):
 	point  = sgen.gen_pointing(oparam)
 with bench.show("resp"):
@@ -161,6 +183,9 @@ with bench.show("pixels"):
 	pix    = sgen.gen_pixels(point, sky.wcs, spec_wcs)
 with bench.show("signal"):
 	signal = sgen.gen_signal(sky, pix, resp, order=np.abs(order))
+with bench.show("downsample"):
+	signal = signal.reshape(signal.shape[:-1] + (signal.shape[-1]/len(oparam.weights),len(oparam.weights)))
+	signal = np.sum(signal*oparam.weights,-1)
 with bench.show("write"):
 	with h5py.File(ofile,"w") as hfile:
 		hfile["point"] = point.point
