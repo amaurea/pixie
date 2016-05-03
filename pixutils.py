@@ -72,3 +72,13 @@ def write_map(fname, m, spec_wcs):
 	with warnings.catch_warnings():
 		warnings.filterwarnings('ignore')
 		hdus.writeto(fname, clobber=True)
+
+def arr2fullsky(arr):
+	arr = np.asarray(arr)
+	wcs = enlib.wcs.WCS(naxis=2)
+	wcs.wcs.crval = [0,0]
+	wcs.wcs.cdelt = [360,180]
+	wcs.wcs.crpix = [1.5,1.5]
+	wcs.wcs.ctype = ["RA---CAR","DEC--CAR"]
+	oarr = arr[...,None,None] + np.zeros([2,2],dtype=arr.dtype)
+	return enmap.enmap(oarr, wcs)
