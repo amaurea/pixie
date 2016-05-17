@@ -22,6 +22,8 @@ def rmat(ax, ang): return utils.rotmatrix(ang, ax)
 def rot(a, ax, ang): return rmul(rmat(ax,ang),a)
 #def norm(a): return a/np.sum(a**2,-1)[...,None]**0.5
 
+# FIXME: Should go to 7.4 THz (actually 512/8 of the CO line freq)
+
 class ScanGenerator:
 	def __init__(self):
 		# Pointing of each barrel (bucket) relative to the barrel spin axis, in the
@@ -34,11 +36,11 @@ class ScanGenerator:
 		self.opening_angle=np.pi/2
 		# Target optical delay at max stroke in mm
 		self.delay_amp     = 0.01
-		self.delay_period  = 1.0
+		self.delay_period  = 8.0
 		self.delay_phase   = 0.0
 		self.spin_period   = 60.0
 		self.spin_phase    = 0.0
-		self.scan_period   = 512*self.spin_period
+		self.scan_period   = 384*self.spin_period
 		self.scan_phase    = np.pi/2
 		self.orbit_period  = 365.25636*24*3600
 		self.orbit_phase   = 0.0
@@ -136,8 +138,8 @@ class ScanGenerator:
 			c1, c2 = np.cos(ang1), np.cos(ang2)
 			s1, s2 = np.sin(ang1), np.sin(ang2)
 			res[di,:,:,:] = np.array([
-				[[ u, c1, s1],[ u,-c2,-s2]],
-				[[ u, c1, s1],[-u, c2, s2]]])
+				[[ u, c1, s1],[ u,-c2,-s2]],   # DC
+				[[ u, c1, s1],[-u, c2, s2]]])  # delay
 		return res
 	def gen_barrel_pixels(self, bpoint, delay, wcs_pos, wcs_delay):
 		"""Maps pointing to pixels[{pix_dc, pix_delay, pix_y, pix_x},ntime]
