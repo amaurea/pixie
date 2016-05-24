@@ -52,6 +52,8 @@ for idesc in args.idescs:
 		for f1,f2 in fblocks:
 			ospec[f1:f2] += scale[f1:f2,None,None,None] * m[None,:,:,:]
 ospec /= ounit
+		enmap.write_map("ucmb.fits",unlensed)
+		enmap.write_map("lcmb.fits",m)
 
 if args.delaymap:
 	# Go from spectrum to delay (spectrogram)

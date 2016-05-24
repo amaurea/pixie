@@ -1,5 +1,5 @@
 import numpy as np, pixutils, argparse
-from enlib import enmap, powspec, colors
+from enlib import enmap, powspec, colors, utils
 parser = argparse.ArgumentParser()
 parser.add_argument("idir", nargs="?", default="inputs")
 parser.add_argument("odir", nargs="?", default="imaps")
@@ -7,7 +7,7 @@ args = parser.parse_args()
 
 # Generate the inputs to our simulator, which should be enmaps.
 # First generate the simulated CMB
-shape, wcs = pixutils.build_fullsky_geometry(0.1, dims=(3,))
+shape, wcs = pixutils.fullsky_geometry(0.1*utils.degree, dims=(3,))
 
 # Then project our dust map onto our target coordinates
 print colors.green + "Projecting dust model" + colors.reset

@@ -83,16 +83,41 @@ def arr2fullsky(arr):
 	oarr = arr[...,None,None] + np.zeros([2,2],dtype=arr.dtype)
 	return enmap.enmap(oarr, wcs)
 
-def build_fullsky_geometry(res=0.1, dims=()):
+def fullsky_geometry(res=0.1*utils.degree, dims=()):
 	"""Build an enmap covering the full sky, with the outermost pixel centers
 	at the poles and wrap-around points."""
-	nx,ny = int(360/res), int(180/res)
+	nx,ny = int(2*np.pi/res), int(np.pi/res)
 	wcs   = enlib.wcs.WCS(naxis=2)
 	wcs.wcs.crval = [0,0]
 	wcs.wcs.cdelt = [360./nx,180./ny]
 	wcs.wcs.crpix = [nx/2+1,ny/2+1]
 	wcs.wcs.ctype = ["RA---CAR","DEC--CAR"]
 	return dims+(ny+1,nx+1), wcs
+
+def longitude_geometry(box, res=0.1*utils.degree, dims=()):
+	"""Produce a longitudinal geometry, which follows a stripe around a line
+	of longitude, and is approximately flat in this strip. box is [{from,to},[dec,ra]},
+	but the ra bounds only apply along dec=0 - elsewhere they will be larger."""
+	# WCS works in degrees
+	box = np.array(box)/utils.degree
+	res = res/utils.degree
+	# Find our center point. All our coordinates should be within
+	# 180 degrees from this point, but our reference point can
+	# only be along the equator. We can achieve this by putting
+	# it at [ra0,0], assuming our patch isn't wider than 360 degrees,
+	# which it shouldn't be.
+	dec0, ra0 = np.mean(box,0)
+	wdec, wra = box[1]-box[0]
+	wcs = enlib.wcs.WCS(naxis=2)
+	wcs.wcs.ctype = ['RA---CAR','DEC--CAR']
+	wcs.wcs.cdelt = [res*np.sign(wdec),res*np.sign(wra)]
+	wcs.wcs.crval = [ra0,0]
+	wcs.wcs.crpix = [-(dec0-abs(wdec)/2.)/res+1,abs(wra)/2./res+1]
+	wcs.wcs.lonpole = 90
+	wcs.wcs.latpole = 0
+	nra  = int(abs(wdec/res))
+	ndec = int(abs(wra/res))
+	return dims + (nra,ndec), wcs
 
 def sim_cmb_map(shape, wcs, powspec, ps_unit=1e-6, lmax=None, seed=None, T_monopole=None, verbose=False, beta=None, aberr_dir=None, oversample=2):
 	"""Simulate lensed cmb map with the given [phi,T,E,B]-ordered
