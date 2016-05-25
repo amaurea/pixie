@@ -1,9 +1,10 @@
-import numpy as np, argparse, pixutils, h5py
+import numpy as np, argparse, pixutils, spectrogram, h5py
 from enlib import enmap, bunch, utils, bench
 parser = argparse.ArgumentParser()
-parser.add_argument("sky_map")
+parser.add_argument("imaps", nargs="+")
 parser.add_argument("reference")
 parser.add_argument("ofile")
+parser.add_argument("-r", "--res",       type=float, default=0.2)
 parser.add_argument("-B", "--barrels",   type=str,   default="oo")
 parser.add_argument("-i", "--start",     type=float, default=0)
 parser.add_argument("-d", "--duration",  type=float, default=1)
@@ -25,10 +26,11 @@ def rot(a, ax, ang): return rmul(rmat(ax,ang),a)
 # FIXME: Should go to 7.4 THz (actually 512/8 of the CO line freq)
 
 class ScanGenerator:
-	def __init__(self):
+	def __init__(self, res=0.2*utils.degree, oversample=1, interpol_mode="plain"):
 		# Pointing of each barrel (bucket) relative to the barrel spin axis, in the
 		# form of zyz euler angles
 		self.barrel_offs = np.array([[0,0,0],[0,0,0]],dtype=float)
+		self.barrel_beams= np.array([1.9,1.9])*utils.degree*utils.fwhm
 		# Responsivity of each detector in each barrel to horizontal and vertical pol
 		self.det_angle   = np.array([0,np.pi/2,0,np.pi/2])
 		self.det_barrels = np.array([ [0,1],[0,1],[1,0],[1,0] ])
@@ -50,28 +52,34 @@ class ScanGenerator:
 		self.ref_ctime     = 1500000000
 		self.sample_period = 1/256.0
 		self.nbarrel = len(self.barrel_offs)
-	def gen_orbit(self, i0=0, n=100000, step=1, oversample=1, interpol_mode="plain"):
+		# Internal resolution stuff
+		self.fmax  = 7.4e12
+		self.nfreq = 2048
+		self.res   = res
+		self.oversample = oversample
+		self.interpol_mode = interpol_mode
+	def gen_orbit(self, i0=0, n=100000, step=1):
 		"""Generate our orbital positions. These are needed to compute the pointing."""
 		i_base  = np.arange(n)*step + i0
+		oversample = self.oversample
 		if oversample == 1:
 			off, weights = np.array([0.0]), np.array([1.0])
 		else:
-			if interpol_mode == "gauss":
+			if self.interpol_mode == "gauss":
 				off, weights = np.polynomial.legendre.leggauss(oversample)
 				# Go from [-1,1] to [-0.5,0.5]
 				off /= 2
 				weights /= 2
-			elif interpol_mode == "plain":
+			elif self.interpol_mode == "plain":
 				off = 0.5*((2*np.arange(oversample)+1)/float(oversample)-1)
 				weights = np.full(oversample,1.0)/float(oversample)
-			elif interpol_mode == "trap":
+			elif self.interpol_mode == "trap":
 				off = np.arange(oversample)/float(oversample-1)-0.5
 				weights = np.concatenate([[1],np.full(oversample-2,2.0),[1]])/(2.0*(oversample-1))
-			elif interpol_mode == "simpson":
+			elif self.interpol_mode == "simpson":
 				oversample = oversample/2*2+1
 				off = np.arange(oversample)/float(oversample-1)-0.5
 				weights = np.concatenate([[1],((1+np.arange(oversample-2))%2+1)*2,[1]])/(3.0*(oversample-1))
-				print off, weights
 		t = (i_base[:,None] + off[None,:]).reshape(-1) * self.sample_period
 		ang_orbit = self.orbit_phase   + 2*np.pi*np.floor(t/self.orbit_step)*self.orbit_step/self.orbit_period
 		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
@@ -141,6 +149,27 @@ class ScanGenerator:
 				[[ u, c1, s1],[ u,-c2,-s2]],   # DC
 				[[ u, c1, s1],[-u, c2, s2]]])  # delay
 		return res
+	def gen_spectrum_patch(self, point, generator, pad=0):
+		"""Given the pointing[{phi,theta},...] and a spectrogram generator,
+		returns the unsmoothed spectrum map and the frequency information."""
+		# First get the bounding box for this chunk of points
+		box = pixutils.longitude_band_bounds(point, step=250)
+		box = utils.widen_box(box, pad, relative=False)
+		# Generate a locally flat coordinate system
+		shape, wcs = pixutils.longitude_geometry(box, res=self.res, dims=(self.nfreq,))
+		wcs_freq   = pixutils.freq_geometry(self.fmax, self.nfreq)
+		# Evaluate the spectrum
+		return generator.get_raw_specmap(shape, wcs, wcs_freq)
+	def gen_sky_patch(self, point, generator, beam):
+		spec,  wcs_freq  = self.gen_spectrum_patch(point, generator, pad=beam*5)
+		# Same beam for all freqs for now. But should not be hard to expand this.
+		napod = int(np.ceil(beam/spec.wcs.wcs.cdelt[0]))
+		spec  = enmap.apod(spec, napod)
+		spec  = enmap.smooth_gauss(spec, beam)
+		bsky,  wcs_delay = pixutils.spec2delay(spec, wcs_freq)
+		# Move TQU first
+		bsky = np.rollaxis(bsky,1)
+		return bsky, wcs_delay
 	def gen_barrel_pixels(self, bpoint, delay, wcs_pos, wcs_delay):
 		"""Maps pointing to pixels[{pix_dc, pix_delay, pix_y, pix_x},ntime]
 		for the specified barrel. These are used in gen_signal_barrel to
@@ -162,8 +191,8 @@ class ScanGenerator:
 		# skies is a list of sky arrays, one per barrel. Each sky is [{T,Q,U},ndelay,y,x]
 		ndet, ntime = bresp.shape[0], bresp.shape[-1]
 		# Since sky is [{T,Q,U},ndelay,y,x], sig_barrel will be [{T,Q,U},nbarrel,ntime]
-		sig_barrel_dc    = utils.interpol(bsky, bpix[[0,2,3]], order=order, mode="constant", mask_nan=False, prefilter=False)
-		sig_barrel_delay = utils.interpol(bsky, bpix[1:],      order=order, mode="constant", mask_nan=False, prefilter=False)
+		sig_barrel_dc    = utils.interpol(bsky, bpix[[0,2,3]], order=order, mode="constant", mask_nan=False)
+		sig_barrel_delay = utils.interpol(bsky, bpix[1:],      order=order, mode="constant", mask_nan=False)
 		# resp[ndet,{0,delay},nbarrel,{T,Q,U},ntime] tells us how to turn the
 		# barrel signals into detector outputs
 		bsignal  = np.einsum("dct,ct->dt", bresp[:,0], sig_barrel_dc)
@@ -173,30 +202,35 @@ class ScanGenerator:
 ofile = args.ofile
 order = args.interpol
 with bench.show("read"):
-	# Read our sky cube, which should be [{T,Q,U},ndelay,y,x]
-	sky, spec_wcs = pixutils.read_map(args.sky_map)
-	ref, ref_wcs  = pixutils.read_map(args.reference)
-with bench.show("prefilter"):
-	# Prefilter to make interpolation faster
-	if order > 1: sky = utils.interpol_prefilter(sky, order)
-	if order > 1: ref = utils.interpol_prefilter(ref, order)
+	# Read in our sky components
+	input_sky = [spectrogram.read_spec_input(imap) for imap in args.imaps]
+	sky_generator = spectrogram.SpectrogramGenerator(input_sky)
+	input_ref = [spectrogram.read_spec_input(args.reference)]
+	ref_generator = spectrogram.SpectrogramGenerator(input_ref)
+#with bench.show("prefilter"):
+#	# Prefilter to make interpolation faster
+#	if order > 1: sky = utils.interpol_prefilter(sky, order)
+#	if order > 1: ref = utils.interpol_prefilter(ref, order)
 # Set up our skies
-skies = [(sky,spec_wcs) if state == "o" else (ref,ref_wcs) for state in args.barrels]
+skies = [sky_generator if state == "o" else ref_generator for state in args.barrels]
 
-sgen = ScanGenerator()
+#### Ok, start our simulation ####
+sgen = ScanGenerator(res=args.res*utils.degree, oversample=args.oversample, interpol_mode=args.interpol_mode)
 with bench.show("orbit"):
 	offset = int(sgen.scan_period/sgen.sample_period * args.start)
 	num    = int(sgen.scan_period/sgen.sample_period * args.duration)
-	oparam = sgen.gen_orbit(i0=offset, n=num, step=args.step, oversample=args.oversample, interpol_mode=args.interpol_mode)
+	oparam = sgen.gen_orbit(i0=offset, n=num, step=args.step)
 with bench.show("pointing"):
 	pinfo  = sgen.gen_pointing(oparam)
 with bench.show("response"):
 	resp   = sgen.gen_det_resp(pinfo.gamma)
-with bench.show("signal"):
-	signal = np.zeros([resp.shape[0], resp.shape[-1]])
-	for barrel in range(sgen.nbarrel):
-		bsky, bspec_wcs = skies[barrel]
-		bpix    = sgen.gen_barrel_pixels(pinfo.point[:,barrel], pinfo.delay, bsky.wcs, bspec_wcs)
+signal = np.zeros([resp.shape[0], resp.shape[-1]])
+for barrel in range(sgen.nbarrel):
+	with bench.show("patch"):
+		bsky,  wcs_delay = sgen.gen_sky_patch(pinfo.point[:,barrel], skies[barrel], sgen.barrel_beams[barrel])
+	with bench.show("pixels"):
+		bpix    = sgen.gen_barrel_pixels(pinfo.point[:,barrel], pinfo.delay, bsky.wcs, wcs_delay)
+	with bench.show("signal"):
 		signal += sgen.gen_barrel_signal(bsky, bpix, resp[:,:,barrel], order=np.abs(order))
 with bench.show("downgrade"):
 	nsub    = len(oparam.weights)

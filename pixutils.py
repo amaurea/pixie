@@ -1,4 +1,4 @@
-import numpy as np, warnings, astropy.io.fits, enlib.wcs, healpy
+import numpy as np, warnings, astropy.io.fits, enlib.wcs
 from enlib import enmap, fft, utils, curvedsky, lensing, aberration, sharp, coordinates
 
 Tcmb= 2.725
@@ -94,9 +94,15 @@ def fullsky_geometry(res=0.1*utils.degree, dims=()):
 	wcs.wcs.ctype = ["RA---CAR","DEC--CAR"]
 	return dims+(ny+1,nx+1), wcs
 
+def freq_geometry(fmax, nfreq):
+	wcs = enlib.wcs.WCS(naxis=1)
+	wcs.wcs.cdelt[0] = fmax/nfreq
+	wcs.wcs.ctype[0] = 'FREQ'
+	return wcs
+
 def longitude_geometry(box, res=0.1*utils.degree, dims=()):
 	"""Produce a longitudinal geometry, which follows a stripe around a line
-	of longitude, and is approximately flat in this strip. box is [{from,to},[dec,ra]},
+	of longitude, and is approximately flat in this strip. box is [{from,to},{dec,ra}],
 	but the ra bounds only apply along dec=0 - elsewhere they will be larger."""
 	# WCS works in degrees
 	box = np.array(box)/utils.degree
@@ -115,9 +121,46 @@ def longitude_geometry(box, res=0.1*utils.degree, dims=()):
 	wcs.wcs.crpix = [-(dec0-abs(wdec)/2.)/res+1,abs(wra)/2./res+1]
 	wcs.wcs.lonpole = 90
 	wcs.wcs.latpole = 0
-	nra  = int(abs(wdec/res))
-	ndec = int(abs(wra/res))
-	return dims + (nra,ndec), wcs
+	nra  = int(round(abs(wra/res)))
+	ndec = int(round(abs(wdec/res)))
+	return dims + (nra+1,ndec+1), wcs
+
+def longitude_band_bounds(point, step=1, niter=10):
+	"""point[{phi,theta],...], returns [{from,to},{theta,phi}], as that's what
+	longitude geometry wants."""
+	point = np.array(point).reshape(2,-1)[:,::step]/utils.degree
+	# First find the minimum abs theta. That side of the sky will be our reference.
+	imin  = np.argmin(np.abs(point[1]))
+	phiref, thetaref = point[:,imin]
+	# Find first point that's twice as close to one of the poles.
+	# We will use this to define the reference pole
+	pdist  = 90-np.abs(point[1])
+	closer = np.where(pdist < pdist[imin]/2)[0]
+	# If there is no such point, just use the one with the highest value
+	imid = closer[0] if len(closer) > 0 else np.argmin(pdist)
+	theta_closer = point[1,imid]
+	# Our first esimate of the center phi is inaccurate,
+	# so iterate to get a better mean.
+	for i in range(niter):
+		# Ok, define our wcs
+		wcs = enlib.wcs.WCS(naxis=2)
+		wcs.wcs.ctype = ['RA---CAR','DEC--CAR']
+		wcs.wcs.cdelt = [1,1]
+		wcs.wcs.crval = [phiref,0]
+		wcs.wcs.crpix = [-thetaref+1,1]
+		wcs.wcs.latpole = 0
+		if theta_closer > 0:
+			wcs.wcs.lonpole =  90
+		else:
+			wcs.wcs.lonpole = -90
+		# Transform the points. Since cdelt = 1, these new
+		# pixel coordinates will correspond to flat-sky angles
+		x, y = wcs.wcs_world2pix(point[0], point[1], 0)
+		box = np.array([
+			[thetaref+np.min(x),phiref-np.max(y)],
+			[thetaref+np.max(x),phiref-np.min(y)]])
+		phiref -= np.mean(y)
+	return box*utils.degree
 
 def sim_cmb_map(shape, wcs, powspec, ps_unit=1e-6, lmax=None, seed=None, T_monopole=None, verbose=False, beta=None, aberr_dir=None, oversample=2):
 	"""Simulate lensed cmb map with the given [phi,T,E,B]-ordered
@@ -140,13 +183,21 @@ def sim_cmb_map(shape, wcs, powspec, ps_unit=1e-6, lmax=None, seed=None, T_monop
 	m_abber = aberration.aberrate(m_lensed, dir=aberr_dir, beta=beta)
 	return m_unlensed, m_lensed, m_abber
 
+def sim_reference_blackbody(shape, wcs, T=None):
+	if T is None: T = Tcmb
+	res = enmap.zeros(shape, wcs)
+	res[0] = T
+	return res
+
 def read_healpix(fname):
+	import healpy
 	try:
 		return np.array(healpy.read_map(fname, field=range(3)))
 	except IndexError:
 		return np.array(healpy.read_map(fname))
 
 def project_healpix(shape, wcs, healmap, rot=None, verbose=False):
+	import healpy
 	ncomp, npix = healmap.shape
 	nside = healpy.npix2nside(npix)
 	lmax  = 3*nside
