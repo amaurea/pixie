@@ -39,6 +39,9 @@ def graybody(freqs, T, beta, deriv=False):
 		return res
 
 def spec2delay(arr, wcs, axis=0, inplace=False, bsize=32):
+	"""Converts a spectrum cube arr[nfreq,...] into an
+	autocorrelation function [delay,...]. The frequency
+	information is described by the spectral wcs argument."""
 	arr = np.asanyarray(arr)
 	if not inplace: arr = arr.copy()
 	with utils.flatview(arr, [axis], "rw") as aflat:
@@ -50,6 +53,28 @@ def spec2delay(arr, wcs, axis=0, inplace=False, bsize=32):
 			aflat[i1:i2] = fft.redft00(aflat[i1:i2]) * 0.5
 	owcs = wcs.deepcopy()
 	owcs.wcs.cdelt[0] = c/wcs.wcs.cdelt[0]/nfreq/2
+	owcs.wcs.ctype[0] = 'TIME'
+	# Take into account the units on the x-axis
+	arr *= wcs.wcs.cdelt[0]
+	return arr, owcs
+
+def delay2spec(arr, wcs, axis=0, inplace=False, bsize=32):
+	"""Converts an autocorrelation cube arr[ndelay,...] into an
+	autocorrelation function [delay,...]. The delay
+	information is described by the temporal wcs argument."""
+	arr = np.asanyarray(arr)
+	if not inplace: arr = arr.copy()
+	with utils.flatview(arr, [axis], "rw") as aflat:
+		n = aflat.shape[0]
+		ndelay = aflat.shape[1]
+		nb = (n+bsize-1)/bsize
+		for bi in range(nb):
+			i1, i2 = bi*bsize, min(n,(bi+1)*bsize)
+			aflat[i1:i2] = fft.redft00(aflat[i1:i2]*2, normalize=True)
+	# Update our wcs
+	owcs = wcs.deepcopy()
+	owcs.wcs.cdelt[0] = c/wcs.wcs.cdelt[0]/ndelay/2
+	owcs.wcs.ctype[0] = 'FREQ'
 	return arr, owcs
 
 def read_map(fname, hdu=0):
@@ -97,6 +122,7 @@ def fullsky_geometry(res=0.1*utils.degree, dims=()):
 def freq_geometry(fmax, nfreq):
 	wcs = enlib.wcs.WCS(naxis=1)
 	wcs.wcs.cdelt[0] = fmax/nfreq
+	wcs.wcs.crpix[0] = 1
 	wcs.wcs.ctype[0] = 'FREQ'
 	return wcs
 
