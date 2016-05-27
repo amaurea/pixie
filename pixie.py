@@ -11,10 +11,12 @@
 #    for each barrel:
 #       horn_sig = 0
 #       for each subbeam in barrel:
+#          patch = patches[barrel.sky][subbeam.type]
 #          point = calc_pointing(orbit, subbeam)
-#          resp  = calc_response(point, barrel) # [nhorn,{dc,delay},...]
+#          pix   = calc_pixels(point.angpos, point.delay, patch.wcs, patch.wcs_delay)
+#          resp  = calc_response(point.gamma, subbeam.response, barrel) # [nhorn,{dc,delay},...]
 #          for each horn:
-#             horn_sig[horn] += calc_barrel_signal(patches[barrel.sky][subbeam.type], resp[horn])
+#             horn_sig[horn] += calc_barrel_signal(patch, pix, resp[horn])
 #       for each det in all barrels:
 #          det_sig[det] += calc_det_signal(horn_sig[det.horn], det.response)
 #    det_sig = downsample(det_sig)
@@ -60,7 +62,24 @@
 #   This version modifies gen instead. Shorter, but
 #   I don't like the hidden variables.
 
-##### Response #####
+##### Signal #####
+
+def calc_det_signal(sig_horn, det_response):
+	"""Calculate the signal a detector with det_response[{TQU}] sees,
+	based on the signal sig_horn[{TQU},ntime] incident on its horn."""
+	return np.einsum("a,at->t", det_response, sig_horn)
+
+def calc_horn_signal(pmap, pix, horn_resp, order=3):
+	"""Calcualte the TQU signal incident on a horn with responsitivy
+	horn_resp[{dc,delay},{TQU},{TQU},ntime]. pmap is the patch
+	array pix was computed for, and is [{dc,delay,yx},ntime]"""
+	# Get the barrel-indicent signal for each sample
+	sig_dc    = utils.interpol(pmap, pix[[0,2,3]], order=order, mode="constant", mask_nan=False)
+	sig_delay = utils.interpol(pmap, pix[1:],      order=order, mode="constant", mask_nan=False)
+	# Apply the horn's response matrix to get the signal entering that horn
+	sig_horn  = np.einsum("abt,bt->at", horn_resp[0], sig_dc)
+	sig_horn += np.einsum("abt,bt->at", horn_resp[1], sig_delay)
+	return sig_horn
 
 def calc_response(gamma, beam_resp, bidx):
 	"""Calculate the response matrix transforming TQU on the sky
@@ -145,14 +164,26 @@ class PointingGenerator:
 		R = np.einsum("tik->kit", R)
 		# Extract the pointing angles
 		xvec, zvec = R[:,0], R[:,2]
-		point = utils.rect2ang(zvec,axis=0, zenith=False)
+		angpos = utils.rect2ang(zvec,axis=0, zenith=False)
 		# Make sure phi is between -180 and 180
-		point[0] = utils.rewind(point[0])
+		angpos[0] = utils.rewind(angpos[0])
 		# Get the polarization orientation on the sky
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
 		# And the delay at each time
 		delay = self.delay_amp * np.sin(delay_ang)
-		return bunch.Bunch(point=point, gamma=gamma, delay=delay, pos=zvec)
+		return bunch.Bunch(angpos=angpos, gamma=gamma, delay=delay, pos=zvec)
+
+def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
+	"""Maps pointing to pixels[{pix_dc, pix_delay, pix_y, pix_x},ntime]."""
+		ntime = angpos.shape[-1]
+		pix = np.zeros([4,ntime])
+		pix[0]  = wcs_delay.wcs_world2pix([0], 1)[0]
+		pix[1]  = wcs_delay.wcs_world2pix(np.abs(delay), 1)[0]
+		# angpos is [{phi,theta},ntime], but world2pix wants [:,{phi,theta}] in degrees
+		pdeg = angpos.T / utils.degree
+		# The result will be [:,{x,y}], but we want [{y,x},ntime]
+		pix[3:1:-1] = wcs_pos.wcs_world2pix(pdeg,0).T
+		return pix
 
 ##### Spectrogram generation #####
 
@@ -219,7 +250,7 @@ class Field:
 		"""Project our values onto a patch with the given shape and wcs. Returns
 		a new Field."""
 		pos = enmap.posmap(shape, wcs)
-		map = self.pmap.at(pos, order=self.order, prefilter=False)
+		map = self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False)
 		return Field(self.name, map, self.spec, self.beam, self.order)
 	def __call__(self, freq):
 		return enmap.samewcs(self.spec(freq, self.map), self.map)
