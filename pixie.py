@@ -5,7 +5,8 @@
 #       for each field in sky:
 #          subfield = field.project(shape, wcs)
 #          for each beam_type:
-#             patches[sky][beam_type] += get_patch_spectrogram(subfield, beam_type)
+#             specmap = calc_specmap(subfield, freqs, beam_type)
+#             patches[sky][beam_type] += calc_spectrogram(specmap, freq_wcs)
 #    for each barrel:
 #       horn_sig = 0
 #       for each subbeam in barrel:
@@ -30,6 +31,25 @@
 # spec is a function (freq,map) -> map[nfreq,...]
 # beam_component is a function (freq,l) -> val[{fshape},{lshape}]
 # beam_type is just an index into a list of beam_components
+
+
+
+
+
+##### Spectrogram generation #####
+
+def calc_spectrogram(specmap, wcs_freq):
+	"""Transform specmap into a spectrogram. Specmap must be be equi-spaced
+	according to wcs_frea. Returns a spectrogram and corresponding delay_wcs."""
+	return pixutils.spec2delay(spec, wcs_freq)
+
+def calc_specmap(field, freqs, beam):
+	"""Compute the observed spectrum for the given field, taking
+	into account the observed beam and correcting for the beam present
+	in the field data."""
+	specmap = field(freqs)
+	specmap = update_beam(specmap, beam, field.beam)
+	return specmap
 
 def read_field(fname):
 	"""Read a field from a specially prepared fits file."""
@@ -62,13 +82,16 @@ class Field:
 		self.spec = spec
 		self.beam = beam
 		self.order= order
-		self.map  = utils.interpol_prefilter(map, order=order)
+		self.map  = map
+		self.pmap = utils.interpol_prefilter(map, order=order)
 	def project(self, shape, wcs):
 		"""Project our values onto a patch with the given shape and wcs. Returns
 		a new Field."""
 		pos = enmap.posmap(shape, wcs)
-		map = self.map.at(pos, order=self.order, prefilter=False)
+		map = self.pmap.at(pos, order=self.order, prefilter=False)
 		return Field(self.name, map, self.spec, self.beam, self.order)
+	def __call__(self, freq):
+		return enmap.samewcs(self.spec(freq, self.map), self.map)
 
 ##### Spectrum types #####
 
