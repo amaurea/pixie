@@ -4,6 +4,78 @@ it for simulated spectrograms."""
 import numpy as np, pixutils
 from enlib import utils, enmap
 
+# 1. The input maps may not have the same beam. We therefore need
+#    to apply beams per component.
+# 2. If the generator is queried independently per beam, then
+#    the work involved in interpolating the values and evaluating
+#    the spectrum is duplicated.
+#
+# Here's how I would want things to work:
+# comps, cbeams = generate_patch(patch desc)
+# for each beam_profile:
+#   spec_map = 0
+#   for each comp, cbeam:
+#     spec_map += switch_beam(comp, beam_profile, cbeam)
+#   delay_map[beam_profile] = spec2delay(spec_map)
+# Generate the TQU incident at the bottom of each barrel, in
+# detector coordinates.
+# for each obarrel:
+#   for each ibarrel:
+#      How TQU at the bottom (output side) of barrel obarrel
+#      relates to the TQU incident at the top (input side) of
+#      barrel ibarrel. [{dc,delay},{TQU},{TQU}] per sample.
+#      resp_params = calc_resp_params(gamma, ibarrel, obarrel)
+#      for beam_profile, beam_resp in beam_decompositions[ibarrel]:
+
+# Should not calculate pointing per barrel. Should do so per
+# beam component. In a nice case these would coincide, but
+# for more complicated beams we want the beam offsets in
+# focaplane coordinates, and must therefore apply them before
+# the coordinate transformation.
+#
+# Should have a different name for the input and output barrels.
+# How about "barrel" for the sky-facing part and "horn" for the
+# detector-facing part?
+#
+# So perhaps our whole program loop would be:
+#
+# for each sample chunk:
+#    orbit = generate_orbit(chunk)
+#    for each sky:
+#       shape, wcs  = estimate_patch_bounds(orbit)
+#       comp_info   = get_patch_components(sky, shape, wcs)
+#       for each beam_type:
+#          patches[sky][beam_type] = get_patch_spectrogram(comp_info, beam_type)
+#    for each barrel:
+#       horn_sig = 0
+#       for each subbeam in barrel:
+#          point = calc_pointing(orbit, subbeam)
+#          resp  = calc_response(point, barrel) # [nhorn,{dc,delay},...]
+#          horn_sig += calc_barrel_signal(patches[barrel.sky][subbeam.type], resp)
+#       for each det in all barrels:
+#          det_sig[det] += calc_det_signal(horn_sig[det.horn], det.response)
+#    det_sig = downsample(det_sig)
+
+# That's a pretty nice structure. Let's aim for a program whose
+# main function is as simple as this.
+#
+# field:     .name, .map, .beam, .spec
+# sky:       .name, .fields
+# comp_info: [(.name, .specmap, .beam),...]
+# barrel:    .id, .sky, .beam
+# beam:      .subbeams
+# subbeam:   .beam_type, .offsets, .response
+# detector:  .horn, .response
+
+# Actually, how does per detector beams work in this setup?
+# Barrel beams are easy because they happen before all the
+# interferometry - each barrel just sees a differnt sky.
+# But for detector beams, the difference would come from
+# stuff inside the interferometer, like the filters or
+# the mirror. Which means that their effect would be
+# spread between multiple skies. That's nasty. Let's
+# not do that for now.
+
 class SpectrogramGenerator:
 	def __init__(self, inputs=[], order=3, unit=1e-20):
 		self.order  = order
