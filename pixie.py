@@ -13,7 +13,8 @@
 #       for each subbeam in barrel:
 #          point = calc_pointing(orbit, subbeam)
 #          resp  = calc_response(point, barrel) # [nhorn,{dc,delay},...]
-#          horn_sig += calc_barrel_signal(patches[barrel.sky][subbeam.type], resp)
+#          for each horn:
+#             horn_sig[horn] += calc_barrel_signal(patches[barrel.sky][subbeam.type], resp[horn])
 #       for each det in all barrels:
 #          det_sig[det] += calc_det_signal(horn_sig[det.horn], det.response)
 #    det_sig = downsample(det_sig)
@@ -58,6 +59,39 @@
 #   gen.orbit, gen.brot, gen.point
 #   This version modifies gen instead. Shorter, but
 #   I don't like the hidden variables.
+
+##### Response #####
+
+def calc_response(gamma, beam_resp, bidx):
+	"""Calculate the response matrix transforming TQU on the sky
+	seen through barrel #bidx, to TQU entering each horn,
+	after taking coordinate transformations, interferometric mixing
+	and beam responsitivity into account. beam_resp is [{TQU},{TQU}].
+	"""
+	ntime, nhorn, ncomp = gamma.shape, 2, 3
+	A, B = bidx, 1-bidx
+	u = np.full(ntime, 1.0)
+	c = np.cos(2*gamma)
+	s = np.sin(2*gamma)
+	# First apply the sky rotation
+	R = np.array([
+		[ u, 0, 0],
+		[ 0, c,-s],
+		[ 0, s, c]])
+	# Then apply the beam response
+	R = np.einsum("ab,bct->act", beam_resp, R)
+	# And then the interferometry:
+	# I = 1/4*(Ii + Ij)[0] + 1/4*(Ii - Ij)[delta]
+	# Q = 1/4*(Qi - Qj)[0] + 1/4*(Qi + Qj)[delta]
+	# U = 1/4*(Ui - Uj)[0] + 1/4*(Ui + Uj)[delta]
+	res = np.zeros([nhorn, 2, ncomp, ncomp, ntime])
+	T, Q, U  = R
+	res[A,0] = [ T, Q, U] # me, DC
+	res[A,1] = [ T, Q, U] # me, delay
+	res[B,0] = [ T,-Q,-U] # other, DC
+	res[B,1] = [-T, Q, U] # other, delay
+	res /= 4
+	return res
 
 ##### Pointing #####
 
@@ -233,7 +267,6 @@ class BeamGauss:
 		res = np.zeros(freq.shape, + l.shape)
 		res[:] = np.exp(-0.5*l**2*(self.fwhm**2/(8*np.log(2))))
 		return res
-
 
 ##### Helpers #####
 
