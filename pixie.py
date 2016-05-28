@@ -81,7 +81,7 @@ class PixieSim:
 		elements    = self.pointgen.calc_elements(ctimes)
 		orientation = self.pointgen.calc_orientation(elements)
 		# Prepare the input spectrogram patches
-		patches = None
+		patches = [[[None] for btype in self.beam_types] for sky in self.skies]
 		for isky, sky in enumerate(self.skies):
 			shape, wcs = self.get_patch_bounds(orientation)
 			for ifield, field in enumerate(sky):
@@ -89,21 +89,32 @@ class PixieSim:
 				for ibtype, btype in self.beam_types:
 					specmap = calc_specmap(subfield, self.freqs, btype)
 					pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
-					patches = add_patch(patches, isky, ibtype, Patch(pmap, wcs_delay))
+					add_patch(patches, isky, ibtype, Patch(pmap, wcs_delay))
 		# Add up the signal contributions to each horn
-		horn_sig = np.zeros([self.nhorn,self.ncomp,len(ctimes)])
+		horn_sig  = np.zeros([self.nhorn,self.ncomp,len(ctimes)])
+		point_all, pix_all = [], []
 		for ibarrel, barrel in self.barrels:
 			for isub, subbeam in barrel.subbeams:
 				patch = patches[barrel.sky, subbeam.type]
-				point = self.pointgen.calc_pointing(orientation, elements.ang_delay, subbeam.offset)
+				point = self.pointgen.calc_pointing(orientation, elements.delay, subbeam.offset)
 				pix   = calc_pixels(point.angpos, point.delay, patch.wcs, patch.wcs_delay)
 				resp  = calc_response(point.gamma, subbeam.response, ibarrel) # [nhorn,{dc,delay},...]
 				for ihorn in range(self.nhorn):
 					horn_sig[ihorn] += calc_horn_signal(patch.map, pix, resp[ihorn])
+				# Save pointing and pixels for TOD output
+				point_all.append(point)
+				pix_all.append(pix)
 		# Read off each detector's response
 		det_sig = np.zeros([self.ndet,len(ctimes)])
 		for idet, det in enumerate(self.dets):
 			det_sig[idet] = calc_det_signal(horn_sig[det.horn], det.response)
+		# output result as a PixieTOD
+		return PixieTOD(
+				signal   = det_sig,
+				elements = [elements.ctime, elements.orbit, elements.scan, elements.spin, elements.delay],
+				point    = [[point.angpos[0],point.angpos[1],point.gamma] for point in point_all],
+				pix      = [pix[1:] for pix in pix_all])
+
 	def get_patch_bounds(self, orientation):
 		"""Return the (shape,wcs) geometry needed for simulating the sky at the
 		given orientation, including any beam offsets and a margin to allow for
@@ -120,6 +131,31 @@ class PixieSim:
 		box   = utils.widen_box(box, pad, relative=False)
 		# Actually generate the geometry
 		return  pixutils.longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,))
+
+##### TOD container #####
+
+# What members should we have in the TOD? The minimum is signal for each detector
+# plus orbital elements. This is what the mapmaker would take as input. But it
+# can also be useful to include the on-sky pointing (and perhaps pixels). I will
+# include all of it for now. Store as signal[ndet,nsamp], elements[{ctime,orbit,scan,spin,delay},nsamp],
+# point[nbeam,{phi,theta,gamma},nsamp], pix[nbeam,{y,x,delay},nsamp]
+
+class PixieTOD:
+	"""Container for Pixie TODs."""
+	def __init__(self, signal, elements, point=None, pix=None):
+		self.signal   = np.array(signal)
+		self.elements = np.array(elements)
+		self.point    = np.array(point) if point is not None else None
+		self.pix      = np.array(pix)   if pix   is not None else None
+
+def downsample_tod_blockwise(tod, weights):
+		"""Return a new PixieTOD where the samples have been downsampled according
+		to weights[nblock,nsub], where nblock*nsamp must equal nsamp in the input
+		tod."""
+		def dsamp(a):
+			if a is not None:
+				return np.sum(a.reshape(a.shape[:-1]+weights.shape)*weights,-1)
+		return PixieTod(dsamp(tod.signal), dsamp(tod.elements), dsamp(tod.point), dsamp(tod.pix))
 
 ##### Signal #####
 
@@ -197,7 +233,8 @@ class PointingGenerator:
 		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
 		ang_spin  = self.spin_phase    + 2*np.pi*t/self.spin_period
 		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
-		return bunch.Bunch(ctime=ctime, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, ang_delay=ang_delay)
+		delay     = self.delay_amp * np.sin(ang_delay)
+		return bunch.Bunch(ctime=ctime, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, ang_delay=ang_delay, delay=delay)
 	def calc_orientation(self, elements):
 		"""Compute a rotation matrix representing the orientation of the
 		telescope for the given orbital elements."""
@@ -208,7 +245,7 @@ class PointingGenerator:
 		R = rot(R, "y", np.pi/2 - self.eclip_ang)
 		R = rot(R, "z", elements.orbit)
 		return R
-	def calc_pointing(self, orientation, ang_delay, offset):
+	def calc_pointing(self, orientation, delay, offset):
 		"""Compute the on-sky pointing and phase delay angle for the given telescope
 		orientation and phase delay, after applying the given offset from the
 		boresight."""
@@ -228,8 +265,6 @@ class PointingGenerator:
 		angpos[0] = utils.rewind(angpos[0])
 		# Get the polarization orientation on the sky
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
-		# And the delay at each time
-		delay = self.delay_amp * np.sin(ang_delay)
 		return bunch.Bunch(angpos=angpos, gamma=gamma, delay=delay, pos=zvec)
 
 def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
@@ -370,8 +405,25 @@ class BeamGauss:
 		res[:] = np.exp(-0.5*l**2*(self.fwhm**2/(8*np.log(2))))
 		return res
 
+##### Containers #####
+
+class Patch:
+	"""A simple container for spectrogram patches. Should really have a
+	more fullblown, general class for this ala enmap. But for now, this
+	is all I need."""
+	def __init__(self, map, wcs_delay):
+		self.map, self.wcs_delay = map.map.copy(), map.wcs_delay.deepcopy()
+	@property
+	def wcs(self): return self.map.wcs
+	def copy(self): return Patch(self.map, selv.wcs_delay)
+
 ##### Helpers #####
 
 def rmul(R, a): return np.einsum("...ij,...jk->...ik",a,R)
 def rmat(ax, ang): return utils.rotmatrix(ang, ax)
 def rot(a, ax, ang): return rmul(rmat(ax,ang),a)
+def add_patch(patches, isky, ibtype, patch):
+	if patches[isky][ibtype] is None:
+		patches[isky][ibtype] = patch
+	else:
+		patches[isky][ibtype].map += patch.map
