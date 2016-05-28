@@ -74,6 +74,16 @@
 class PixieSim:
 	def __init__(self, config):
 		pass
+	def gen_tod(self, ctimes):
+		tods  = []
+		nsamp = len(ctimes)
+		for i in range(0, nsamp, self.chunk_size):
+			mytimes = ctimes[i:i+self.chunk_size]
+			subtimes, weights = subsample(mytimes, self.subsampling)
+			subtod  = self.gen_tod_raw(subtimes)
+			mytod   = downsample_tod_blockwise(subtod, weights)
+			tods.append(mytod)
+		return concatenate_tod(tods)
 	def gen_tod_raw(self, ctimes):
 		"""Generate the time-ordered data for the sample times given in ctimes.
 		No oversampling is done, nor is chunking. This is a helper function that
@@ -150,10 +160,19 @@ class PixieTOD:
 def downsample_tod_blockwise(tod, weights):
 		"""Return a new PixieTOD where the samples have been downsampled according
 		to weights[nsub], such that the result is nsub times shorter."""
+		# This may break for quantities with angle cuts!
 		def dsamp(a):
 			if a is not None:
 				return np.sum(a.reshape(a.shape[:-1]+(-1,weights.size))*weights,-1)
 		return PixieTod(dsamp(tod.signal), dsamp(tod.elements), dsamp(tod.point), dsamp(tod.pix))
+
+def concatenate_tod(tods):
+	"""Concatenate a list of tods into a single one."""
+	return PixieTOD(
+			np.concatenate([tod.signal   for tod in tods],-1),
+			np.concatenate([tod.elements for tod in tods],-1),
+			np.concatenate([tod.point    for tod in tods]) if tods[0].point is not None else None,
+			np.concatenate([tod.pix      for tod in tods]) if tods[0].pix   is not None else None)
 
 ##### Signal #####
 
@@ -417,12 +436,12 @@ class Patch:
 
 ##### Oversampling #####
 
-def oversample(ctime, nsub, scheme="plain"):
+def subsample(ctime, nsub, scheme="plain"):
 	"""Given an *equispaced* ctime, generate a new ctime
 	with nsub times more samples. The samples are placed
 	depending on the scheme chosen, each of which corresponds
 	to a different integration quadrature. Returns the new
-	oversampled ctime and an array of quadrature weights."""
+	subsampled ctime and an array of quadrature weights."""
 	nbin = len(ctime)
 	dt   = ctime[1]-ctime[0]
 	# Ignore schemes if subsampling is disabled (nsub=1)
@@ -445,7 +464,7 @@ def oversample(ctime, nsub, scheme="plain"):
 		# Go from [-1,1] to [-0.5,0.5]
 		off /= 2
 		weights /= 2
-	# Build the oversampled version of ctime
+	# Build the subsampled version of ctime
 	ctime_out = (ctime[:,None] + (off*dt)[None,:]).reshape(-1)
 	return ctime_out, weights
 
