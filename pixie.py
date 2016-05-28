@@ -61,6 +61,65 @@
 #   gen.orbit, gen.brot, gen.point
 #   This version modifies gen instead. Shorter, but
 #   I don't like the hidden variables.
+#
+# It would have been convenient to have an enmap-like class supporting
+# spectra wcs, so I don't have to pass around map,wcs tuples all the time.
+# I should probably make a more general class for that. Most of enmap's
+# features could be supported, except for the multipole-specific stuff,
+# which requires knowledge about what the wcs axes mean.
+
+
+##### The main simulator class #####
+
+class PixieSim:
+	def __init__(self, config):
+		pass
+	def gen_tod_raw(self, ctimes):
+		"""Generate the time-ordered data for the sample times given in ctimes.
+		No oversampling is done, nor is chunking. This is a helper function that
+		should usually not be called directly."""
+		elements    = self.pointgen.calc_elements(ctimes)
+		orientation = self.pointgen.calc_orientation(elements)
+		# Prepare the input spectrogram patches
+		patches = None
+		for isky, sky in enumerate(self.skies):
+			shape, wcs = self.get_patch_bounds(orientation)
+			for ifield, field in enumerate(sky):
+				subfield = field.project(shape, wcs)
+				for ibtype, btype in self.beam_types:
+					specmap = calc_specmap(subfield, self.freqs, btype)
+					pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
+					patches = add_patch(patches, isky, ibtype, Patch(pmap, wcs_delay))
+		# Add up the signal contributions to each horn
+		horn_sig = np.zeros([self.nhorn,self.ncomp,len(ctimes)])
+		for ibarrel, barrel in self.barrels:
+			for isub, subbeam in barrel.subbeams:
+				patch = patches[barrel.sky, subbeam.type]
+				point = self.pointgen.calc_pointing(orientation, elements.ang_delay, subbeam.offset)
+				pix   = calc_pixels(point.angpos, point.delay, patch.wcs, patch.wcs_delay)
+				resp  = calc_response(point.gamma, subbeam.response, ibarrel) # [nhorn,{dc,delay},...]
+				for ihorn in range(self.nhorn):
+					horn_sig[ihorn] += calc_horn_signal(patch.map, pix, resp[ihorn])
+		# Read off each detector's response
+		det_sig = np.zeros([self.ndet,len(ctimes)])
+		for idet, det in enumerate(self.dets):
+			det_sig[idet] = calc_det_signal(horn_sig[det.horn], det.response)
+	def get_patch_bounds(self, orientation):
+		"""Return the (shape,wcs) geometry needed for simulating the sky at the
+		given orientation, including any beam offsets and a margin to allow for
+		beam smoothing."""
+		# Get the padding needed based on the beam size and maximum beam offset
+		rmax  = [subbeam.offset[1] for subbeam in self.subbeams]
+		bsize = max([beam_type.fwhm for beam_type in self.beam_types])*utils.fwhm
+		pad   = rmax + bsize*self.beam_nsigma
+		# Get a (hopefully) representative subset of the pointing as angular coordinates
+		zvec  = orientation.T[:,2,::self.bounds_skip]
+		angpos= utils.rect2ang(zvec, axis=0, zenith=False)
+		# Get the bounds needed for a longitudinal strip to contain these angles
+		box   = pixutils.longitude_band_bounds(angpos, niter=self.bounds_iter)
+		box   = utils.widen_box(box, pad, relative=False)
+		# Actually generate the geometry
+		return  pixutils.longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,))
 
 ##### Signal #####
 
@@ -138,7 +197,7 @@ class PointingGenerator:
 		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
 		ang_spin  = self.spin_phase    + 2*np.pi*t/self.spin_period
 		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
-		return bunch.Bunch(ctime=ctime, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, delay=ang_delay)
+		return bunch.Bunch(ctime=ctime, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, ang_delay=ang_delay)
 	def calc_orientation(self, elements):
 		"""Compute a rotation matrix representing the orientation of the
 		telescope for the given orbital elements."""
@@ -149,7 +208,7 @@ class PointingGenerator:
 		R = rot(R, "y", np.pi/2 - self.eclip_ang)
 		R = rot(R, "z", elements.orbit)
 		return R
-	def calc_pointing(self, orientation, delay_ang, offset):
+	def calc_pointing(self, orientation, ang_delay, offset):
 		"""Compute the on-sky pointing and phase delay angle for the given telescope
 		orientation and phase delay, after applying the given offset from the
 		boresight."""
@@ -170,7 +229,7 @@ class PointingGenerator:
 		# Get the polarization orientation on the sky
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
 		# And the delay at each time
-		delay = self.delay_amp * np.sin(delay_ang)
+		delay = self.delay_amp * np.sin(ang_delay)
 		return bunch.Bunch(angpos=angpos, gamma=gamma, delay=delay, pos=zvec)
 
 def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
@@ -190,7 +249,7 @@ def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
 def calc_spectrogram(specmap, wcs_freq):
 	"""Transform specmap into a spectrogram. Specmap must be be equi-spaced
 	according to wcs_frea. Returns a spectrogram and corresponding delay_wcs."""
-	return pixutils.spec2delay(spec, wcs_freq)
+	return pixutils.spec2delay(specmap, wcs_freq)
 
 def calc_specmap(field, freqs, beam):
 	"""Compute the observed spectrum for the given field, taking
@@ -209,9 +268,21 @@ def update_beam(specmap, freqs, obeam, ibeam, apod=0.5):
 	fmap = enmap.fft(map)
 	lmap = enmap.lmap(map)
 	fmap *= obeam(freqs, lmap)
-	fmap /= ibeam(freqs, lmap)
+	fmap /= make_beam_safe(ibeam(freqs, lmap))
 	map = enmap.ifft(fmap).real
 	return map
+
+def make_beam_safe(beam, tol=1e-13):
+	"""Cap very low beam values from below while preserving sign.
+	Not sure if preserving sign is important. The main goal of this
+	function is to avoid division by zero or tiny numbers when unapplying
+	a beam."""
+	beam = np.array(beam)
+	bad  = np.abs(beam)<tol
+	sig  = np.sign(beam[bad])
+	sig[sig==0] = 1
+	beam[bad] = tol*sig
+	return beam
 
 def read_field(fname):
 	"""Read a field from a specially prepared fits file."""
