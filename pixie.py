@@ -114,7 +114,6 @@ class PixieSim:
 				elements = [elements.ctime, elements.orbit, elements.scan, elements.spin, elements.delay],
 				point    = [[point.angpos[0],point.angpos[1],point.gamma] for point in point_all],
 				pix      = [pix[1:] for pix in pix_all])
-
 	def get_patch_bounds(self, orientation):
 		"""Return the (shape,wcs) geometry needed for simulating the sky at the
 		given orientation, including any beam offsets and a margin to allow for
@@ -150,11 +149,10 @@ class PixieTOD:
 
 def downsample_tod_blockwise(tod, weights):
 		"""Return a new PixieTOD where the samples have been downsampled according
-		to weights[nblock,nsub], where nblock*nsamp must equal nsamp in the input
-		tod."""
+		to weights[nsub], such that the result is nsub times shorter."""
 		def dsamp(a):
 			if a is not None:
-				return np.sum(a.reshape(a.shape[:-1]+weights.shape)*weights,-1)
+				return np.sum(a.reshape(a.shape[:-1]+(-1,weights.size))*weights,-1)
 		return PixieTod(dsamp(tod.signal), dsamp(tod.elements), dsamp(tod.point), dsamp(tod.pix))
 
 ##### Signal #####
@@ -416,6 +414,40 @@ class Patch:
 	@property
 	def wcs(self): return self.map.wcs
 	def copy(self): return Patch(self.map, selv.wcs_delay)
+
+##### Oversampling #####
+
+def oversample(ctime, nsub, scheme="plain"):
+	"""Given an *equispaced* ctime, generate a new ctime
+	with nsub times more samples. The samples are placed
+	depending on the scheme chosen, each of which corresponds
+	to a different integration quadrature. Returns the new
+	oversampled ctime and an array of quadrature weights."""
+	nbin = len(ctime)
+	dt   = ctime[1]-ctime[0]
+	# Ignore schemes if subsampling is disabled (nsub=1)
+	if nsub == 1: return ctime, np.full([nbin,nsub],1.0)
+	# Get the subsample offsets and subsample weights
+	# depending on which scheme we use.
+	if scheme == "plain":
+		off     = 0.5*((2*np.arange(nsub)+1)/float(nsub)-1)
+		weights = np.full(nsub,1.0)/float(nsub)
+	elif scheme == "trap":
+		off = np.arange(nsub)/float(nsub-1)-0.5
+		weights = np.concatenate([[1],np.full(nsub-2,2.0),[1]])/(2.0*(nsub-1))
+	elif scheme == "simpson":
+		# Only odd number of subsamples supported
+		nsub = nsub/2*2+1
+		off = np.arange(nsub)/float(nsub-1)-0.5
+		weights = np.concatenate([[1],((1+np.arange(nsub-2))%2+1)*2,[1]])/(3.0*(nsub-1))
+	elif scheme == "gauss":
+		off, weights = np.polynomial.legendre.leggauss(nsub)
+		# Go from [-1,1] to [-0.5,0.5]
+		off /= 2
+		weights /= 2
+	# Build the oversampled version of ctime
+	ctime_out = (ctime[:,None] + (off*dt)[None,:]).reshape(-1)
+	return ctime_out, weights
 
 ##### Helpers #####
 
