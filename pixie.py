@@ -73,13 +73,58 @@
 
 class PixieSim:
 	def __init__(self, config):
-		pass
-	def gen_tod(self, ctimes):
-		tods  = []
-		nsamp = len(ctimes)
+		# Pointing
+		self.pointgen      = PointingGenerator(**config.__dict__)
+		self.sample_period = config.sample_period
+
+		# Spectrogram patches
+		self.chunk_size    = int(config.chunk_size)
+		self.bounds_skip   = int(config.bounds_skip)
+		self.bounds_niter  = int(config.bounds_niter)
+		self.beam_nsigma   = config.beam_nsigma
+		self.patch_res     = config.patch_res * utils.degree
+
+		# Subsampling
+		self.subsample_num = int(config.subsample_num)
+		self.subsample_method = config.subsample_method
+
+		# Skies. Each sky is a list of fields, such as cmb or dust
+		self.skies = [[read_field(field) for field in sky] for sky in config.skies]
+
+		# Beam types
+		self.beam_types = [parse_beam(beam_type) for beam_type in config.beam_types]
+
+		# Barrels
+		self.barrels = [parse_barrel(barrel) for barrel in config.barrels]
+
+		# Detectors
+		self.dets = [parse_det(det) for det in config.dets]
+
+		# Computed
+		self.ncomp       = 3
+		self.nsamp_orbit = int(np.round(self.pointgen.orbit_period/self.sample_period))
+	@property
+	def ref_ctime(self): return self.pointgen.ref_ctime
+	def gen_tod_orbit(self, i):
+		"""Generate the full TOD for orbit #i, defined as the samples
+		i*nsamp_orbit:(i+1)*nsamp_orbit. If the reference time is not
+		at the start of an orbit, the cut from one orbit to the next
+		will happen in the middle of these tods. We assume that there
+		is an integer number of samples in an orbit."""
+		samples = np.arange(i*self.nsamp_orbit,(i+1)*self.nsamp_orbit)
+		return self.gen_tod_samples(samples)
+	def gen_tod_samples(self, samples):
+		"""Generate time ordered data for the given sample indices.
+		The sample index starts at 0 at the reference time, and
+		increases by 1 for each sample_period seconds. This function
+		applies subchunking (to save memory) and subsampling (to simulate
+		continous integration inside each sample) automatically."""
+		tods   = []
+		nsamp  = len(samples)
+		ctimes = self.ref_ctime + np.asarray(samples)*float(self.sample_period)
 		for i in range(0, nsamp, self.chunk_size):
 			mytimes = ctimes[i:i+self.chunk_size]
-			subtimes, weights = subsample(mytimes, self.subsampling)
+			subtimes, weights = subsample(mytimes, self.subsample_num, self.subsample_method)
 			subtod  = self.gen_tod_raw(subtimes)
 			mytod   = downsample_tod_blockwise(subtod, weights)
 			tods.append(mytod)
@@ -241,7 +286,7 @@ class PointingGenerator:
 		self.orbit_period = kwargs["orbit_period"]
 		self.orbit_phase  = kwargs["orbit_phase"]*utils.degree
 		self.orbit_step   = kwargs["orbit_step"]
-		self.eclip_ang    = kwargs["eclib_ang"]*utils.degree
+		self.eclip_angle  = kwargs["eclib_angle"]*utils.degree
 		self.ref_ctime    = kwargs["ref_ctime"]
 	def calc_elements(self, ctime):
 		"""Generate orbital elements for each ctime."""
@@ -259,7 +304,7 @@ class PointingGenerator:
 		R = rot(R, "z", elements.spin)
 		R = rot(R, "y", np.pi/2 - self.opening_angle)
 		R = rot(R, "z", elements.scan)
-		R = rot(R, "y", np.pi/2 - self.eclip_ang)
+		R = rot(R, "y", np.pi/2 - self.eclip_angle)
 		R = rot(R, "z", elements.orbit)
 		return R
 	def calc_pointing(self, orientation, delay, offset):
@@ -467,6 +512,28 @@ def subsample(ctime, nsub, scheme="plain"):
 	# Build the subsampled version of ctime
 	ctime_out = (ctime[:,None] + (off*dt)[None,:]).reshape(-1)
 	return ctime_out, weights
+
+##### Parsing #####
+
+def parse_beam(params):
+	if params["type"] is "none":
+		return BeamNone()
+	elif params["type"] is "gauss":
+		return BeamGauss(params["fwhm"]*utils.degree)
+	else:
+		raise ValueError("Unknown beam type '%s'" % params["type"])
+
+def parse_barrel(params):
+	return bunch.Bunch(
+			sky=params["sky"],
+			subbeams=[bunch.Bunch(
+					type = int(subbeam["type"]),
+					offset = np.array(subbeam["offset"]),
+					response = np.array(subbeam["response"]),
+				) for subbeam in params["subbeams"]])
+
+def parse_det(params):
+	return bunch.Bunch(horn=int(params["horn"]), response=np.array(params["response"]))
 
 ##### Helpers #####
 
