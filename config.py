@@ -21,8 +21,8 @@ eclip_angle   = 0
 # Frequencies
 fmax          = 7.4e12
 nfreq         = 2048
-lmax          = 500
-nl            = 500
+lmax          = 5000
+nl            = 1000
 
 # These affect memory use and accuracy
 subsample_num = 5
@@ -33,8 +33,10 @@ subsample_method = "gauss"
 chunk_size    = 4e5
 bounds_skip   = 13
 bounds_niter  = 7
-beam_nsigma   = 7
-patch_res     = 0.25
+beam_nsigma   = 1
+patch_res     = 0.05
+patch_nsub    = 10
+patch_pad     = 8.0
 
 # The detectors
 dets = [

@@ -21,6 +21,8 @@ class PixieSim:
 		self.bounds_niter  = int(config.bounds_niter)
 		self.beam_nsigma   = config.beam_nsigma
 		self.patch_res     = config.patch_res * utils.degree
+		self.patch_nsub    = int(config.patch_nsub)
+		self.patch_pad     = config.patch_pad * utils.degree
 
 		# Subsampling. Force to odd number
 		self.subsample_num = int(config.subsample_num)/2*2+1
@@ -45,13 +47,7 @@ class PixieSim:
 		self.nsamp_orbit = int(np.round(self.pointgen.orbit_period/self.sample_period))
 		self.wcs_freq    = pixutils.freq_geometry(self.fmax, self.nfreq)
 		self.freqs       = self.wcs_freq.wcs_pix2world(np.arange(self.nfreq),0)[0]
-
-		# We need the maps to be band-limited before we do anything else with
-		# them. To do this we will pre-smooth everything to the smallest (highest
-		# response) common beam, and update the beams to compensate. For this operation we need
-		# raster beams, so pre-rasterize.
-		refbeam = calc_reference_beam(self.beam_types, self.fmax, self.nfreq, self.lmax, self.nl)
-		self.skies = [[field.to_beam(refbeam) for field in sky] for sky in self.skies]
+		self.refbeam     = calc_reference_beam(self.beam_types, self.fmax, self.nfreq, self.lmax, self.nl)
 	@property
 	def ref_ctime(self): return self.pointgen.ref_ctime
 	def gen_tod_orbit(self, i):
@@ -91,7 +87,7 @@ class PixieSim:
 				shape, wcs = self.get_patch_bounds(orientation)
 			for ifield, field in enumerate(sky):
 				with bench.show("field.project"):
-					subfield = field.project(shape, wcs)
+					subfield = calc_subfield(field, shape, wcs, self.refbeam, subsample=self.patch_nsub, pad=self.patch_pad)
 				for ibtype, btype in enumerate(self.beam_types):
 					with bench.show("calc_specmap"):
 						specmap = calc_specmap(subfield, self.freqs, btype)
@@ -138,6 +134,7 @@ class PixieSim:
 		# Get the padding needed based on the beam size and maximum beam offset
 		rmax  = [subbeam.offset[1] for barrel in self.barrels for subbeam in barrel.subbeams]
 		bsize = max([beam_type.fwhm for beam_type in self.beam_types])*utils.fwhm
+		print bsize/utils.degree, self.beam_nsigma
 		pad   = rmax + bsize*self.beam_nsigma
 		# Get a (hopefully) representative subset of the pointing as angular coordinates
 		zvec  = orientation.T[:,2,::self.bounds_skip]
@@ -335,22 +332,39 @@ def calc_specmap(field, freqs, beam):
 	"""Compute the observed spectrum for the given field, taking
 	into account the observed beam and correcting for the beam present
 	in the field data."""
+	#print field.beam.type
+	#print field.beam.vals.shape
 	specmap = field(freqs)
-	specmap = update_beam(specmap, freqs, beam, field.beam)
+	#enmap.write_map("dogA.fits", specmap)
+	specmap = update_beam(specmap, freqs, beam, field.beam, moo=False)
+	#enmap.write_map("dogC.fits", specmap)
+	#1/0
 	return specmap
 
-def update_beam(map, freqs, obeam, ibeam, apod=1.0):
+i = 0
+def update_beam(map, freqs, obeam, ibeam, apod=0.0, moo=False):
 	"""Return map after unapplying ibeam and applying obeam."""
+	print "fix apod, was 1.0"
+	global i
 	# Apodize a bit to reduce ringing, if requested
+	#enmap.write_map("bazA%d.fits"%i, map)
 	if apod > 0:
 		apod_pix = int(apod*max(ibeam.fwhm, obeam.fwhm)*utils.fwhm/(map.wcs.wcs.cdelt[0]*utils.degree))
 		map  = map.apod(apod_pix, fill="mean")
+	#enmap.write_map("bazB%d.fits"%i, map)
 	# Update the beams
-	fmap = enmap.fft(map)
-	lmap = np.sum(map.lmap()**2,0)**0.5
-	fmap *= obeam(freqs, lmap)[:,None]
-	fmap /= make_beam_safe(ibeam(freqs, lmap))[:,None]
-	map = enmap.ifft(fmap).real
+	if moo:
+		fmap = enmap.fft(map)
+		lmap = np.sum(map.lmap()**2,0)**0.5
+		#print "l", lmap[0,:20]
+		#print "obeam", obeam(freqs, lmap)[0,0,:20]
+		#print "ibeam", ibeam(freqs, lmap)[0,0,:20]
+		#print "ratio", (obeam(freqs, lmap)/ibeam(freqs,lmap))[0,0,:20]
+		fmap *= obeam(freqs, lmap)[:,None]
+		fmap /= ibeam(freqs, lmap)[:,None]
+		map = enmap.ifft(fmap).real
+	#enmap.write_map("bazC%d.fits"%i, map)
+	i += 1
 	return map
 
 def make_beam_safe(beam, tol=1e-13):
@@ -387,6 +401,27 @@ def read_field(fname):
 	else: raise ValueError("Beam type '%s' not recognized" % beam_type)
 	return Field(name.lower(), map, spec, beam)
 
+def calc_subfield(field, shape, wcs, target_beam, subsample=1, pad=0):
+	"""Given a field, compute its value on a new grid given by shape and wcs,
+	smoothing it to the target_beam. The smoothing is done on a subsampled
+	grid to reduce pixelization effects."""
+	#moo = field.project(shape, wcs)
+	#enmap.write_map("subfield_orig.fits", moo.map)
+	# Get our work geometry
+	wshape, wwcs = pixutils.subsample_geometry(shape, wcs, subsample)
+	wshape, wwcs = pixutils.pad_geometry(wshape, wwcs, pad/utils.degree)
+	# Project onto it
+	wfield = field.project(wshape, wwcs)
+	#enmap.write_map("subfield_high.fits", wfield.map)
+	# Smooth this field to the target beam
+	wfield = wfield.to_beam(target_beam, apod=pad/5)
+	#enmap.write_map("subfield_smooth.fits", wfield.map)
+	# And interpolate to the target raster
+	res = wfield.project(shape, wcs)
+	#enmap.write_map("subfield_res.fits", res.map)
+	#1/0
+	return res
+
 class Field:
 	def __init__(self, name, map, spec, beam, order=3):
 		"""A field comprising one component of the sky. Specified
@@ -404,9 +439,10 @@ class Field:
 		pos = enmap.posmap(shape, wcs)
 		map = enmap.ndmap(self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False),wcs)
 		return Field(self.name, map, self.spec, self.beam, self.order)
-	def to_beam(self, beam):
+	def to_beam(self, beam, apod=0):
 		"""Update our field to a new beam."""
-		map = update_beam(self.map[None], [0], beam, self.beam, apod=0)[0]
+		print beam.type, beam.fwhm/utils.degree, self.map.extent()/utils.degree
+		map = update_beam(self.map[None], [0], beam, self.beam, apod=apod, moo=True)[0]
 		return Field(self.name, map, self.spec, beam, order=self.order)
 	def __call__(self, freq):
 		return enmap.samewcs(self.spec(freq, self.map), self.map)
@@ -480,7 +516,7 @@ class BeamRaster(Beam):
 		ifreq = freq*self.nfreq/self.fmax
 		il    = l*self.nl/self.lmax
 		i     = np.zeros((2,) + freq.shape + l.shape)
-		i[0]  = ifreq[:,None]
+		i[0]  = ifreq[(slice(None),)+(None,)*il.ndim]
 		i[1]  = il[None,:]
 		return utils.interpol(self.vals, i, order=3, mode="nearest")
 	def __mul__(self, other):

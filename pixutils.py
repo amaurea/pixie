@@ -188,6 +188,22 @@ def longitude_band_bounds(point, step=1, niter=10):
 		phiref -= np.mean(y)
 	return box*utils.degree
 
+def subsample_geometry(shape, wcs, nsub):
+	owcs = wcs.deepcopy()
+	owcs.wcs.crpix -= 0.5
+	owcs.wcs.crpix *= nsub
+	owcs.wcs.cdelt /= nsub
+	owcs.wcs.crpix += 0.5
+	oshape = tuple(shape[:-2]) + tuple(np.array(shape[-2:])*nsub)
+	return oshape, owcs
+
+def pad_geometry(shape, wcs, pad):
+	owcs = wcs.deepcopy()
+	pad_pix = (np.abs(pad/owcs.wcs.cdelt)/2).astype(int)
+	owcs.wcs.crpix += pad_pix
+	oshape = tuple(shape[:-2]) + tuple(np.array(shape[-2:])+2*pad_pix)
+	return oshape, owcs
+
 def sim_cmb_map(shape, wcs, powspec, ps_unit=1e-6, lmax=None, seed=None, T_monopole=None, verbose=False, beta=None, aberr_dir=None, oversample=2):
 	"""Simulate lensed cmb map with the given [phi,T,E,B]-ordered
 	spectrum, including the effects of sky curvature and aberration."""
