@@ -1,73 +1,5 @@
-# for each sample chunk:
-#    orbit = generate_orbit(chunk)
-#    brot  = calc_telescope_orientation(orbit)
-#    for each sky:
-#       shape, wcs  = estimate_patch_bounds(orbit)
-#       for each field in sky:
-#          subfield = field.project(shape, wcs)
-#          for each beam_type:
-#             specmap = calc_specmap(subfield, freqs, beam_type)
-#             patches[sky][beam_type] += calc_spectrogram(specmap, freq_wcs)
-#    for each barrel:
-#       horn_sig = 0
-#       for each subbeam in barrel:
-#          patch = patches[barrel.sky][subbeam.type]
-#          point = calc_pointing(orbit, subbeam)
-#          pix   = calc_pixels(point.angpos, point.delay, patch.wcs, patch.wcs_delay)
-#          resp  = calc_response(point.gamma, subbeam.response, barrel) # [nhorn,{dc,delay},...]
-#          for each horn:
-#             horn_sig[horn] += calc_barrel_signal(patch, pix, resp[horn])
-#       for each det in all barrels:
-#          det_sig[det] += calc_det_signal(horn_sig[det.horn], det.response)
-#    det_sig = downsample(det_sig)
-
-# That's a pretty nice structure. Let's aim for a program whose
-# main function is as simple as this.
-#
-# field:     .name, .map, .beam, .spec
-# sky:       .name, .fields
-# comp_info: [(.name, .specmap, .beam),...]
-# barrel:    .id, .sky, .beam
-# beam:      .subbeams
-# subbeam:   .beam_type, .offsets, .response
-# detector:  .horn, .response
-#
-# spec is a function (freq,map) -> map[nfreq,...]
-# beam_component is a function (freq,l) -> val[{fshape},{lshape}]
-# beam_type is just an index into a list of beam_components
-
-# I want a pixie class at the top level, which is initialized using
-# configuration object, and which can be called to generate tod
-# chunks. But how should I do the pointing? Should pixie do it
-# directly, or should I have a pointing generator class that
-# pixie calls?
-#
-# * Many configuration parameters configure the pointing.
-#   A pointing generator would either have to take a config
-#   object itself, or have lots of arguments in the constructor.
-# * There are three logical steps in the pointing generation:
-#   orbital parameters, boresight rotmatrix and beam pointing.
-#   The first two depend on several parameters, so would naturally
-#   be methods of an object.
-# * gen = PointingGenerator(...) / gen = Pixie(...)
-#   orbit = gen.calc_orbit(chunk)
-#   brot  = gen.calc_boresight(orbit)
-#   point = gen.calc_pointing(orbit, brot, subbeam)
-#   This approach means we need to pass around quite a few arguments
-# * gen = ...
-#   gen.calc_orbit(chunk)
-#   gen.calc_boresight()
-#   gen.calc_pointing(subbeam)
-#   gen.orbit, gen.brot, gen.point
-#   This version modifies gen instead. Shorter, but
-#   I don't like the hidden variables.
-#
-# It would have been convenient to have an enmap-like class supporting
-# spectra wcs, so I don't have to pass around map,wcs tuples all the time.
-# I should probably make a more general class for that. Most of enmap's
-# features could be supported, except for the multipole-specific stuff,
-# which requires knowledge about what the wcs axes mean.
-
+import numpy as np, h5py, pixutils, astropy.io.fits, copy
+from enlib import enmap, bunch, utils, bench
 
 ##### The main simulator class #####
 
@@ -77,6 +9,12 @@ class PixieSim:
 		self.pointgen      = PointingGenerator(**config.__dict__)
 		self.sample_period = config.sample_period
 
+		# Frequencies
+		self.nfreq         = int(config.nfreq)
+		self.fmax          = int(config.fmax)
+		self.lmax          = int(config.lmax)
+		self.nl            = int(config.nl)
+
 		# Spectrogram patches
 		self.chunk_size    = int(config.chunk_size)
 		self.bounds_skip   = int(config.bounds_skip)
@@ -84,12 +22,9 @@ class PixieSim:
 		self.beam_nsigma   = config.beam_nsigma
 		self.patch_res     = config.patch_res * utils.degree
 
-		# Subsampling
-		self.subsample_num = int(config.subsample_num)
+		# Subsampling. Force to odd number
+		self.subsample_num = int(config.subsample_num)/2*2+1
 		self.subsample_method = config.subsample_method
-
-		# Skies. Each sky is a list of fields, such as cmb or dust
-		self.skies = [[read_field(field) for field in sky] for sky in config.skies]
 
 		# Beam types
 		self.beam_types = [parse_beam(beam_type) for beam_type in config.beam_types]
@@ -100,9 +35,23 @@ class PixieSim:
 		# Detectors
 		self.dets = [parse_det(det) for det in config.dets]
 
+		# Skies. Each sky is a list of fields, such as cmb or dust
+		self.skies = [[read_field(field) for field in sky] for sky in config.skies]
+
 		# Computed
 		self.ncomp       = 3
+		self.nhorn       = 2
+		self.ndet        = len(self.dets)
 		self.nsamp_orbit = int(np.round(self.pointgen.orbit_period/self.sample_period))
+		self.wcs_freq    = pixutils.freq_geometry(self.fmax, self.nfreq)
+		self.freqs       = self.wcs_freq.wcs_pix2world(np.arange(self.nfreq),0)[0]
+
+		# We need the maps to be band-limited before we do anything else with
+		# them. To do this we will pre-smooth everything to the smallest (highest
+		# response) common beam, and update the beams to compensate. For this operation we need
+		# raster beams, so pre-rasterize.
+		refbeam = calc_reference_beam(self.beam_types, self.fmax, self.nfreq, self.lmax, self.nl)
+		self.skies = [[field.to_beam(refbeam) for field in sky] for sky in self.skies]
 	@property
 	def ref_ctime(self): return self.pointgen.ref_ctime
 	def gen_tod_orbit(self, i):
@@ -136,33 +85,46 @@ class PixieSim:
 		elements    = self.pointgen.calc_elements(ctimes)
 		orientation = self.pointgen.calc_orientation(elements)
 		# Prepare the input spectrogram patches
-		patches = [[[None] for btype in self.beam_types] for sky in self.skies]
+		patches = [[None for btype in self.beam_types] for sky in self.skies]
 		for isky, sky in enumerate(self.skies):
-			shape, wcs = self.get_patch_bounds(orientation)
+			with bench.show("get_patch_bounds"):
+				shape, wcs = self.get_patch_bounds(orientation)
 			for ifield, field in enumerate(sky):
-				subfield = field.project(shape, wcs)
-				for ibtype, btype in self.beam_types:
-					specmap = calc_specmap(subfield, self.freqs, btype)
-					pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
+				with bench.show("field.project"):
+					subfield = field.project(shape, wcs)
+				for ibtype, btype in enumerate(self.beam_types):
+					with bench.show("calc_specmap"):
+						specmap = calc_specmap(subfield, self.freqs, btype)
+					with bench.show("calc_spectrogram"):
+						pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
+					# This should be elsewhere
+					with bench.show("prefilter"):
+						pmap = enmap.samewcs(np.ascontiguousarray(np.rollaxis(pmap,1)),pmap)
+						pmap = utils.interpol_prefilter(pmap, npre=1, order=3)
 					add_patch(patches, isky, ibtype, Patch(pmap, wcs_delay))
 		# Add up the signal contributions to each horn
 		horn_sig  = np.zeros([self.nhorn,self.ncomp,len(ctimes)])
 		point_all, pix_all = [], []
-		for ibarrel, barrel in self.barrels:
-			for isub, subbeam in barrel.subbeams:
-				patch = patches[barrel.sky, subbeam.type]
-				point = self.pointgen.calc_pointing(orientation, elements.delay, subbeam.offset)
-				pix   = calc_pixels(point.angpos, point.delay, patch.wcs, patch.wcs_delay)
-				resp  = calc_response(point.gamma, subbeam.response, ibarrel) # [nhorn,{dc,delay},...]
-				for ihorn in range(self.nhorn):
-					horn_sig[ihorn] += calc_horn_signal(patch.map, pix, resp[ihorn])
+		for ibarrel, barrel in enumerate(self.barrels):
+			for isub, subbeam in enumerate(barrel.subbeams):
+				patch = patches[barrel.sky][subbeam.type]
+				with bench.show("calc_pointing"):
+					point = self.pointgen.calc_pointing(orientation, elements.delay, subbeam.offset)
+				with bench.show("calc_pixels"):
+					pix   = calc_pixels(point.angpos, point.delay, patch.wcs, patch.wcs_delay)
+				with bench.show("calc_response"):
+					resp  = calc_response(point.gamma, subbeam.response, ibarrel) # [nhorn,{dc,delay},...]
+				with bench.show("calc_horn_signal"):
+					for ihorn in range(self.nhorn):
+						horn_sig[ihorn] += calc_horn_signal(patch.map, pix, resp[ihorn])
 				# Save pointing and pixels for TOD output
 				point_all.append(point)
 				pix_all.append(pix)
 		# Read off each detector's response
 		det_sig = np.zeros([self.ndet,len(ctimes)])
-		for idet, det in enumerate(self.dets):
-			det_sig[idet] = calc_det_signal(horn_sig[det.horn], det.response)
+		with bench.show("calc_det_signal"):
+			for idet, det in enumerate(self.dets):
+				det_sig[idet] = calc_det_signal(horn_sig[det.horn], det.response)
 		# output result as a PixieTOD
 		return PixieTOD(
 				signal   = det_sig,
@@ -174,15 +136,17 @@ class PixieSim:
 		given orientation, including any beam offsets and a margin to allow for
 		beam smoothing."""
 		# Get the padding needed based on the beam size and maximum beam offset
-		rmax  = [subbeam.offset[1] for subbeam in self.subbeams]
+		rmax  = [subbeam.offset[1] for barrel in self.barrels for subbeam in barrel.subbeams]
 		bsize = max([beam_type.fwhm for beam_type in self.beam_types])*utils.fwhm
 		pad   = rmax + bsize*self.beam_nsigma
 		# Get a (hopefully) representative subset of the pointing as angular coordinates
 		zvec  = orientation.T[:,2,::self.bounds_skip]
 		angpos= utils.rect2ang(zvec, axis=0, zenith=False)
 		# Get the bounds needed for a longitudinal strip to contain these angles
-		box   = pixutils.longitude_band_bounds(angpos, niter=self.bounds_iter)
-		box   = utils.widen_box(box, pad, relative=False)
+		box   = pixutils.longitude_band_bounds(angpos, niter=self.bounds_niter)
+		# 2*pad because the argument to widen_box is the total increase in width, not
+		# the radius.
+		box   = utils.widen_box(box, 2*pad, relative=False)
 		# Actually generate the geometry
 		return  pixutils.longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,))
 
@@ -206,18 +170,36 @@ def downsample_tod_blockwise(tod, weights):
 		"""Return a new PixieTOD where the samples have been downsampled according
 		to weights[nsub], such that the result is nsub times shorter."""
 		# This may break for quantities with angle cuts!
-		def dsamp(a):
+		def dmean(a):
 			if a is not None:
 				return np.sum(a.reshape(a.shape[:-1]+(-1,weights.size))*weights,-1)
-		return PixieTod(dsamp(tod.signal), dsamp(tod.elements), dsamp(tod.point), dsamp(tod.pix))
+		def dmid(a):
+			if a is not None:
+				return a[...,len(weights)/2::len(weights)]
+		return PixieTOD(dmean(tod.signal), dmid(tod.elements), dmid(tod.point), dmid(tod.pix))
 
 def concatenate_tod(tods):
 	"""Concatenate a list of tods into a single one."""
 	return PixieTOD(
 			np.concatenate([tod.signal   for tod in tods],-1),
 			np.concatenate([tod.elements for tod in tods],-1),
-			np.concatenate([tod.point    for tod in tods]) if tods[0].point is not None else None,
-			np.concatenate([tod.pix      for tod in tods]) if tods[0].pix   is not None else None)
+			np.concatenate([tod.point    for tod in tods],-1) if tods[0].point is not None else None,
+			np.concatenate([tod.pix      for tod in tods],-1) if tods[0].pix   is not None else None)
+
+def write_tod(fname, tod):
+	with h5py.File(fname, "w") as hfile:
+		for key in ["signal","elements","point","pix"]:
+			try:
+				hfile[key] = getattr(tod, key)
+			except AttributeError: pass
+
+def read_tod(fname):
+	data = {}
+	with h5py.File(fname, "r") as hfile:
+		for key in ["signal","elements","point","pix"]:
+			if key in hfile:
+				data[key] = tod[key].value
+	return PixieTOD(**data)
 
 ##### Signal #####
 
@@ -231,8 +213,8 @@ def calc_horn_signal(pmap, pix, horn_resp, order=3):
 	horn_resp[{dc,delay},{TQU},{TQU},ntime]. pmap is the patch
 	array pix was computed for, and is [{dc,delay,yx},ntime]"""
 	# Get the barrel-indicent signal for each sample
-	sig_dc    = utils.interpol(pmap, pix[[0,2,3]], order=order, mode="constant", mask_nan=False)
-	sig_delay = utils.interpol(pmap, pix[1:],      order=order, mode="constant", mask_nan=False)
+	sig_dc    = utils.interpol(pmap, pix[[0,2,3]], order=order, mode="constant", mask_nan=False, prefilter=False)
+	sig_delay = utils.interpol(pmap, pix[1:],      order=order, mode="constant", mask_nan=False, prefilter=False)
 	# Apply the horn's response matrix to get the signal entering that horn
 	sig_horn  = np.einsum("abt,bt->at", horn_resp[0], sig_dc)
 	sig_horn += np.einsum("abt,bt->at", horn_resp[1], sig_delay)
@@ -244,16 +226,17 @@ def calc_response(gamma, beam_resp, bidx):
 	after taking coordinate transformations, interferometric mixing
 	and beam responsitivity into account. beam_resp is [{TQU},{TQU}].
 	"""
-	ntime, nhorn, ncomp = gamma.shape, 2, 3
+	ntime, nhorn, ncomp = gamma.size, 2, 3
 	A, B = bidx, 1-bidx
 	u = np.full(ntime, 1.0)
+	o = np.zeros(ntime)
 	c = np.cos(2*gamma)
 	s = np.sin(2*gamma)
 	# First apply the sky rotation
 	R = np.array([
-		[ u, 0, 0],
-		[ 0, c,-s],
-		[ 0, s, c]])
+		[ u, o, o],
+		[ o, c,-s],
+		[ o, s, c]])
 	# Then apply the beam response
 	R = np.einsum("ab,bct->act", beam_resp, R)
 	# And then the interferometry:
@@ -286,7 +269,7 @@ class PointingGenerator:
 		self.orbit_period = kwargs["orbit_period"]
 		self.orbit_phase  = kwargs["orbit_phase"]*utils.degree
 		self.orbit_step   = kwargs["orbit_step"]
-		self.eclip_angle  = kwargs["eclib_angle"]*utils.degree
+		self.eclip_angle  = kwargs["eclip_angle"]*utils.degree
 		self.ref_ctime    = kwargs["ref_ctime"]
 	def calc_elements(self, ctime):
 		"""Generate orbital elements for each ctime."""
@@ -331,15 +314,15 @@ class PointingGenerator:
 
 def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
 	"""Maps pointing to pixels[{pix_dc, pix_delay, pix_y, pix_x},ntime]."""
-		ntime = angpos.shape[-1]
-		pix = np.zeros([4,ntime])
-		pix[0]  = wcs_delay.wcs_world2pix([0], 1)[0]
-		pix[1]  = wcs_delay.wcs_world2pix(np.abs(delay), 1)[0]
-		# angpos is [{phi,theta},ntime], but world2pix wants [:,{phi,theta}] in degrees
-		pdeg = angpos.T / utils.degree
-		# The result will be [:,{x,y}], but we want [{y,x},ntime]
-		pix[3:1:-1] = wcs_pos.wcs_world2pix(pdeg,0).T
-		return pix
+	ntime = angpos.shape[-1]
+	pix = np.zeros([4,ntime])
+	pix[0]  = wcs_delay.wcs_world2pix([0], 1)[0]
+	pix[1]  = wcs_delay.wcs_world2pix(np.abs(delay), 1)[0]
+	# angpos is [{phi,theta},ntime], but world2pix wants [:,{phi,theta}] in degrees
+	pdeg = angpos.T / utils.degree
+	# The result will be [:,{x,y}], but we want [{y,x},ntime]
+	pix[3:1:-1] = wcs_pos.wcs_world2pix(pdeg,0).T
+	return pix
 
 ##### Spectrogram generation #####
 
@@ -356,16 +339,17 @@ def calc_specmap(field, freqs, beam):
 	specmap = update_beam(specmap, freqs, beam, field.beam)
 	return specmap
 
-def update_beam(specmap, freqs, obeam, ibeam, apod=0.5):
-	"""Return specmap after unapplying ibeam and applying obeam."""
-	# Apodize a bit to reduce ringing
-	apod_pix = int(0.5*max(ibeam.fwhm, obeam.fwhm)/(specmap.cdelt[0]*utils.degree))
-	map  = specmap.apod(apod_pix, fill="mean")
+def update_beam(map, freqs, obeam, ibeam, apod=1.0):
+	"""Return map after unapplying ibeam and applying obeam."""
+	# Apodize a bit to reduce ringing, if requested
+	if apod > 0:
+		apod_pix = int(apod*max(ibeam.fwhm, obeam.fwhm)*utils.fwhm/(map.wcs.wcs.cdelt[0]*utils.degree))
+		map  = map.apod(apod_pix, fill="mean")
 	# Update the beams
 	fmap = enmap.fft(map)
-	lmap = enmap.lmap(map)
-	fmap *= obeam(freqs, lmap)
-	fmap /= make_beam_safe(ibeam(freqs, lmap))
+	lmap = np.sum(map.lmap()**2,0)**0.5
+	fmap *= obeam(freqs, lmap)[:,None]
+	fmap /= make_beam_safe(ibeam(freqs, lmap))[:,None]
 	map = enmap.ifft(fmap).real
 	return map
 
@@ -397,7 +381,7 @@ def read_field(fname):
 	# Get the beam information
 	beam_type = header["BEAM"]
 	if beam_type == "NONE":
-		beam = BeamNone()
+		beam = Beam()
 	elif beam_type == "GAUSS":
 		beam = BeamGauss(float(header["FWHM"])*utils.degree)
 	else: raise ValueError("Beam type '%s' not recognized" % beam_type)
@@ -418,8 +402,12 @@ class Field:
 		"""Project our values onto a patch with the given shape and wcs. Returns
 		a new Field."""
 		pos = enmap.posmap(shape, wcs)
-		map = self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False)
+		map = enmap.ndmap(self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False),wcs)
 		return Field(self.name, map, self.spec, self.beam, self.order)
+	def to_beam(self, beam):
+		"""Update our field to a new beam."""
+		map = update_beam(self.map[None], [0], beam, self.beam, apod=0)[0]
+		return Field(self.name, map, self.spec, beam, order=self.order)
 	def __call__(self, freq):
 		return enmap.samewcs(self.spec(freq, self.map), self.map)
 
@@ -433,7 +421,10 @@ class SpecBlackbody:
 		res = enmap.samewcs(np.zeros(freq.shape + map.shape, map.dtype), map)
 		res[:,0]  = pixutils.blackbody(freq, map[0])
 		# Constant polarization fraction by frequency
-		res[:,1:] = res[:,0,None] * (map[None,1:]/map[None,None,0])
+		nonzero   = map[0] != 0
+		polfrac   = map[1:]
+		polfrac[:,nonzero] /= map[0,nonzero]
+		res[:,1:] = res[:,0,None] * polfrac[None]
 		return res
 
 class SpecGraybody:
@@ -452,20 +443,88 @@ class SpecGraybody:
 
 ##### Beam types #####
 
-class BeamNone:
+class Beam:
 	type = "none"
 	fwhm = 0
 	def __call__(self, freq, l):
+		freq, l = np.asarray(freq), np.asarray(l)
 		return np.full(freq.shape + l.shape, 1.0)
+	def copy(self): return copy.deepcopy(self)
 
-class BeamGauss:
+class BeamGauss(Beam):
 	type = "gauss"
 	def __init__(self, fwhm):
 		self.fwhm = fwhm
 	def __call__(self, freq, l):
-		res = np.zeros(freq.shape, + l.shape)
+		freq, l = np.asarray(freq), np.asarray(l)
+		res = np.zeros(freq.shape + l.shape)
 		res[:] = np.exp(-0.5*l**2*(self.fwhm**2/(8*np.log(2))))
 		return res
+
+class BeamRaster(Beam):
+	type = "raster"
+	def __init__(self, vals, fmax, nfreq, lmax, nl):
+		self.vals = vals
+		self.fmax, self.nfreq = fmax, nfreq
+		self.lmax, self.nl    = lmax, nl
+		# Fit a gaussian by finding the l at which we are
+		# down by 1/e**0.5
+		mvals = np.mean(vals,0)
+		idown = np.where(mvals<np.exp(-0.5))[0]
+		idown = idown[0] if len(idown) > 0 else self.nl
+		ldown = idown*float(lmax)/nl
+		self.fwhm = (8*np.log(2))**0.5/ldown
+	def __call__(self, freq, l):
+		# Interpolate the beam value
+		freq, l = np.asarray(freq), np.asarray(l)
+		ifreq = freq*self.nfreq/self.fmax
+		il    = l*self.nl/self.lmax
+		i     = np.zeros((2,) + freq.shape + l.shape)
+		i[0]  = ifreq[:,None]
+		i[1]  = il[None,:]
+		return utils.interpol(self.vals, i, order=3, mode="nearest")
+	def __mul__(self, other):
+		res = self.copy()
+		res.vals *= other.vals
+		return res
+	def __div__(self, other):
+		res = self.copy()
+		good = (res.vals !=0) & (other.vals != 0)
+		res.vals[good] /= other.vals[good]
+		return res
+
+def rasterize_beam(beam, fmax, nfreq, lmax, nl):
+	"""Convert any beam into a rasterized version of itself, within
+	the frequency range [0:fmax] and multipole range [0:lmax], with
+	nfreq and nl samples in between respectively."""
+	freq = np.arange(nfreq,dtype=float)*fmax/nfreq
+	l    = np.arange(nl,dtype=float)*lmax/nl
+	bval = beam(freq, l)
+	return BeamRaster(bval, fmax, nfreq, lmax, nl)
+
+def smallest_beam_raster(beams):
+	"""Given a list of beams, all of which must be rasterized beams with the same raster,
+	returns a single, frequency-independent raster beam which has higher resolution than
+	all of them."""
+	res  = beams[0].copy()
+	res.vals = np.max([b.vals for b in beams],0)
+	return res
+
+def smallest_beam_freq(beam):
+	"""Given a raster beam. Returns a new raster beam that is frequency-independent, and
+	which has the highest resolution of all the frequencies of the input beam."""
+	res = beam.copy()
+	res.vals = np.max(res.vals,0)[None]
+	res.nfreq = 1
+	return res
+
+def calc_reference_beam(beams, fmax, nfreq, lmax, nl):
+	"""Given a list of beams of any type, compute the frequency-independent
+	reference beam on the given raster in freq and multipole."""
+	beams = [rasterize_beam(beam, fmax, nfreq, lmax, nl) for beam in beams]
+	refbeam = smallest_beam_raster(beams)
+	refbeam = smallest_beam_freq(refbeam)
+	return refbeam
 
 ##### Containers #####
 
@@ -474,7 +533,7 @@ class Patch:
 	more fullblown, general class for this ala enmap. But for now, this
 	is all I need."""
 	def __init__(self, map, wcs_delay):
-		self.map, self.wcs_delay = map.map.copy(), map.wcs_delay.deepcopy()
+		self.map, self.wcs_delay = map.copy(), wcs_delay.deepcopy()
 	@property
 	def wcs(self): return self.map.wcs
 	def copy(self): return Patch(self.map, selv.wcs_delay)
@@ -490,7 +549,7 @@ def subsample(ctime, nsub, scheme="plain"):
 	nbin = len(ctime)
 	dt   = ctime[1]-ctime[0]
 	# Ignore schemes if subsampling is disabled (nsub=1)
-	if nsub == 1: return ctime, np.full([nbin,nsub],1.0)
+	if nsub == 1: return ctime, np.full([nsub],1.0)
 	# Get the subsample offsets and subsample weights
 	# depending on which scheme we use.
 	if scheme == "plain":
@@ -517,7 +576,7 @@ def subsample(ctime, nsub, scheme="plain"):
 
 def parse_beam(params):
 	if params["type"] is "none":
-		return BeamNone()
+		return Beam()
 	elif params["type"] is "gauss":
 		return BeamGauss(params["fwhm"]*utils.degree)
 	else:
@@ -545,3 +604,4 @@ def add_patch(patches, isky, ibtype, patch):
 		patches[isky][ibtype] = patch
 	else:
 		patches[isky][ibtype].map += patch.map
+

@@ -18,17 +18,23 @@ orbit_phase   = 0
 orbit_step    = scan_period
 eclip_angle   = 0
 
+# Frequencies
+fmax          = 7.4e12
+nfreq         = 2048
+lmax          = 500
+nl            = 500
+
 # These affect memory use and accuracy
-subsample_num = 10
-subsample_method = "plain"
+subsample_num = 5
+subsample_method = "gauss"
 
 # These affect sub-patches used in the spectrogram
-# calculation
-chunk_size    = 1e5
-bounds_skip   = 37
-bounds_niter  = 10
-beam_nsigma   = 5
-patch_res     = 0.2
+# calculation.
+chunk_size    = 4e5
+bounds_skip   = 13
+bounds_niter  = 7
+beam_nsigma   = 7
+patch_res     = 0.25
 
 # The detectors
 dets = [
