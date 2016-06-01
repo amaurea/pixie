@@ -45,7 +45,7 @@ class PixieSim:
 		self.ncomp       = 3
 		self.nhorn       = 2
 		self.ndet        = len(self.dets)
-		self.nsamp_orbit = int(np.round(self.pointgen.orbit_period/self.sample_period))
+		self.nsamp_orbit = int(np.round(self.pointgen.scan_period/self.sample_period))
 		self.wcs_freq    = freq_geometry(self.fmax, self.nfreq)
 		self.freqs       = self.wcs_freq.wcs_pix2world(np.arange(self.nfreq),0)[0]
 		self.refbeam     = calc_reference_beam(self.beam_types, self.fmax, self.nfreq, self.lmax, self.nl)
@@ -153,6 +153,7 @@ class PixieSim:
 		# 2*pad because the argument to widen_box is the total increase in width, not
 		# the radius.
 		box   = utils.widen_box(box, 2*pad, relative=False)
+		print "box", box/utils.degree
 		# Actually generate the geometry
 		return  longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,), ref=(0,0))
 
@@ -351,7 +352,6 @@ def update_beam(map, freqs, obeam, ibeam, apod=0):
 	if apod > 0:
 		apod_pix = int(apod/(abs(map.wcs.wcs.cdelt[0])*utils.degree))
 		map  = map.apod(apod_pix, fill="mean")
-	enmap.write_map("bazB%d.fits"%i, map)
 	# Update the beams
 	fmap = enmap.fft(map)
 	lmap = np.sum(map.lmap()**2,0)**0.5
@@ -776,6 +776,7 @@ def longitude_geometry(box, res=0.1*utils.degree, dims=(), ref=None):
 		ra0  = np.round((ra0  - ref[1])/res)*res + ref[1]
 		wdec = np.ceil(np.abs(wdec)/(2*res))*2*res*np.sign(wdec)
 		wra  = np.ceil(np.abs(wra) /(2*res))*2*res*np.sign(wra)
+	print "ra0", ra0, "dec0", dec0, "wra", wra, "wdec", wdec
 	wcs = enlib.wcs.WCS(naxis=2)
 	wcs.wcs.ctype = ['RA---CAR','DEC--CAR']
 	wcs.wcs.cdelt = [res*np.sign(wdec),res*np.sign(wra)]
@@ -785,6 +786,11 @@ def longitude_geometry(box, res=0.1*utils.degree, dims=(), ref=None):
 	wcs.wcs.latpole = 0
 	nra  = int(round(abs(wra/res)))
 	ndec = int(round(abs(wdec/res)))
+	print "ctype", wcs.wcs.ctype
+	print "cdelt", wcs.wcs.cdelt
+	print "crval", wcs.wcs.crval
+	print "crpix", wcs.wcs.crpix
+	print "nra", nra, "ndec", ndec
 	return dims + (nra+1,ndec+1), wcs
 
 def longitude_band_bounds(point, step=1, niter=10):
