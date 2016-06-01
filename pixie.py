@@ -23,6 +23,7 @@ class PixieSim:
 		self.patch_res     = config.patch_res * utils.degree
 		self.patch_nsub    = int(config.patch_nsub)
 		self.patch_pad     = config.patch_pad * utils.degree
+		self.patch_apod    = config.patch_apod * utils.degree
 
 		# Subsampling. Force to odd number
 		self.subsample_num = int(config.subsample_num)/2*2+1
@@ -56,7 +57,9 @@ class PixieSim:
 		at the start of an orbit, the cut from one orbit to the next
 		will happen in the middle of these tods. We assume that there
 		is an integer number of samples in an orbit."""
-		samples = np.arange(i*self.nsamp_orbit,(i+1)*self.nsamp_orbit)
+		# +1 to generate a sample of overlap with the next orbit, which is
+		# useful for discontinuity detection and fixing.
+		samples = np.arange(i*self.nsamp_orbit,(i+1)*self.nsamp_orbit+1)
 		return self.gen_tod_samples(samples)
 	def gen_tod_samples(self, samples):
 		"""Generate time ordered data for the given sample indices.
@@ -68,7 +71,9 @@ class PixieSim:
 		nsamp  = len(samples)
 		ctimes = self.ref_ctime + np.asarray(samples)*float(self.sample_period)
 		for i in range(0, nsamp, self.chunk_size):
-			mytimes = ctimes[i:i+self.chunk_size]
+			# +1 for the extra overlap-sample, which we will use to remove
+			# any discontinuities caused by interpolation issues.
+			mytimes = ctimes[i:i+self.chunk_size+1]
 			subtimes, weights = subsample(mytimes, self.subsample_num, self.subsample_method)
 			subtod  = self.gen_tod_raw(subtimes)
 			mytod   = downsample_tod_blockwise(subtod, weights)
@@ -82,15 +87,16 @@ class PixieSim:
 		orientation = self.pointgen.calc_orientation(elements)
 		# Prepare the input spectrogram patches
 		patches = [[None for btype in self.beam_types] for sky in self.skies]
+		with bench.show("get_patch_bounds"):
+			shape, wcs = self.get_patch_bounds(orientation)
 		for isky, sky in enumerate(self.skies):
-			with bench.show("get_patch_bounds"):
-				shape, wcs = self.get_patch_bounds(orientation)
 			for ifield, field in enumerate(sky):
 				with bench.show("field.project"):
-					subfield = calc_subfield(field, shape, wcs, self.refbeam, subsample=self.patch_nsub, pad=self.patch_pad)
+					subfield = calc_subfield(field, shape, wcs, self.refbeam,
+							subsample=self.patch_nsub, pad=self.patch_pad, apod=self.patch_apod)
 				for ibtype, btype in enumerate(self.beam_types):
 					with bench.show("calc_specmap"):
-						specmap = calc_specmap(subfield, self.freqs, btype)
+						specmap = calc_specmap(subfield, self.freqs, btype, apod=self.patch_apod)
 					with bench.show("calc_spectrogram"):
 						pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
 					# This should be elsewhere
@@ -133,9 +139,12 @@ class PixieSim:
 		beam smoothing."""
 		# Get the padding needed based on the beam size and maximum beam offset
 		rmax  = [subbeam.offset[1] for barrel in self.barrels for subbeam in barrel.subbeams]
+		# Max beam size of any output beam
 		bsize = max([beam_type.fwhm for beam_type in self.beam_types])*utils.fwhm
-		print bsize/utils.degree, self.beam_nsigma
-		pad   = rmax + bsize*self.beam_nsigma
+		# Reduce by amount already smoothed. Since fwhms are just approximate,
+		# cap to 1/4 of the original beam for the purposes of finding the padding area
+		bsize = (np.max((bsize/4)**2, bsize**2-self.refbeam.fwhm**2))**0.5
+		pad   = rmax + bsize*self.beam_nsigma + self.patch_apod
 		# Get a (hopefully) representative subset of the pointing as angular coordinates
 		zvec  = orientation.T[:,2,::self.bounds_skip]
 		angpos= utils.rect2ang(zvec, axis=0, zenith=False)
@@ -145,7 +154,7 @@ class PixieSim:
 		# the radius.
 		box   = utils.widen_box(box, 2*pad, relative=False)
 		# Actually generate the geometry
-		return  pixutils.longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,))
+		return  pixutils.longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,), ref=(0,0))
 
 ##### TOD container #####
 
@@ -178,10 +187,10 @@ def downsample_tod_blockwise(tod, weights):
 def concatenate_tod(tods):
 	"""Concatenate a list of tods into a single one."""
 	return PixieTOD(
-			np.concatenate([tod.signal   for tod in tods],-1),
-			np.concatenate([tod.elements for tod in tods],-1),
-			np.concatenate([tod.point    for tod in tods],-1) if tods[0].point is not None else None,
-			np.concatenate([tod.pix      for tod in tods],-1) if tods[0].pix   is not None else None)
+			pixutils.overlap_cat([tod.signal   for tod in tods],-1),
+			pixutils.overlap_cat([tod.elements for tod in tods],-1),
+			pixutils.overlap_cat([tod.point    for tod in tods],-1) if tods[0].point is not None else None,
+			pixutils.overlap_cat([tod.pix      for tod in tods],-1) if tods[0].pix   is not None else None)
 
 def write_tod(fname, tod):
 	with h5py.File(fname, "w") as hfile:
@@ -328,43 +337,29 @@ def calc_spectrogram(specmap, wcs_freq):
 	according to wcs_frea. Returns a spectrogram and corresponding delay_wcs."""
 	return pixutils.spec2delay(specmap, wcs_freq)
 
-def calc_specmap(field, freqs, beam):
+def calc_specmap(field, freqs, beam, apod=0):
 	"""Compute the observed spectrum for the given field, taking
 	into account the observed beam and correcting for the beam present
 	in the field data."""
-	#print field.beam.type
-	#print field.beam.vals.shape
 	specmap = field(freqs)
-	#enmap.write_map("dogA.fits", specmap)
-	specmap = update_beam(specmap, freqs, beam, field.beam, moo=False)
-	#enmap.write_map("dogC.fits", specmap)
-	#1/0
+	specmap = update_beam(specmap, freqs, beam, field.beam, apod=apod)
 	return specmap
 
-i = 0
-def update_beam(map, freqs, obeam, ibeam, apod=0.0, moo=False):
+def update_beam(map, freqs, obeam, ibeam, apod=0):
 	"""Return map after unapplying ibeam and applying obeam."""
-	print "fix apod, was 1.0"
-	global i
 	# Apodize a bit to reduce ringing, if requested
-	#enmap.write_map("bazA%d.fits"%i, map)
 	if apod > 0:
-		apod_pix = int(apod*max(ibeam.fwhm, obeam.fwhm)*utils.fwhm/(map.wcs.wcs.cdelt[0]*utils.degree))
+		apod_pix = int(apod/(abs(map.wcs.wcs.cdelt[0])*utils.degree))
 		map  = map.apod(apod_pix, fill="mean")
-	#enmap.write_map("bazB%d.fits"%i, map)
+	enmap.write_map("bazB%d.fits"%i, map)
 	# Update the beams
-	if moo:
-		fmap = enmap.fft(map)
-		lmap = np.sum(map.lmap()**2,0)**0.5
-		#print "l", lmap[0,:20]
-		#print "obeam", obeam(freqs, lmap)[0,0,:20]
-		#print "ibeam", ibeam(freqs, lmap)[0,0,:20]
-		#print "ratio", (obeam(freqs, lmap)/ibeam(freqs,lmap))[0,0,:20]
-		fmap *= obeam(freqs, lmap)[:,None]
-		fmap /= ibeam(freqs, lmap)[:,None]
-		map = enmap.ifft(fmap).real
-	#enmap.write_map("bazC%d.fits"%i, map)
-	i += 1
+	fmap = enmap.fft(map)
+	lmap = np.sum(map.lmap()**2,0)**0.5
+	ibeam_vals = ibeam(freqs, lmap)
+	obeam_vals = obeam(freqs, lmap)
+	ratio_vals = capped_ratio(obeam_vals, ibeam_vals)
+	fmap *= ratio_vals[:,None]
+	map = enmap.ifft(fmap).real
 	return map
 
 def make_beam_safe(beam, tol=1e-13):
@@ -401,25 +396,19 @@ def read_field(fname):
 	else: raise ValueError("Beam type '%s' not recognized" % beam_type)
 	return Field(name.lower(), map, spec, beam)
 
-def calc_subfield(field, shape, wcs, target_beam, subsample=1, pad=0):
+def calc_subfield(field, shape, wcs, target_beam, subsample=1, pad=0, apod=0):
 	"""Given a field, compute its value on a new grid given by shape and wcs,
 	smoothing it to the target_beam. The smoothing is done on a subsampled
 	grid to reduce pixelization effects."""
-	#moo = field.project(shape, wcs)
-	#enmap.write_map("subfield_orig.fits", moo.map)
 	# Get our work geometry
 	wshape, wwcs = pixutils.subsample_geometry(shape, wcs, subsample)
 	wshape, wwcs = pixutils.pad_geometry(wshape, wwcs, pad/utils.degree)
 	# Project onto it
 	wfield = field.project(wshape, wwcs)
-	#enmap.write_map("subfield_high.fits", wfield.map)
 	# Smooth this field to the target beam
-	wfield = wfield.to_beam(target_beam, apod=pad/5)
-	#enmap.write_map("subfield_smooth.fits", wfield.map)
+	wfield = wfield.to_beam(target_beam, apod=apod)
 	# And interpolate to the target raster
 	res = wfield.project(shape, wcs)
-	#enmap.write_map("subfield_res.fits", res.map)
-	#1/0
 	return res
 
 class Field:
@@ -442,7 +431,7 @@ class Field:
 	def to_beam(self, beam, apod=0):
 		"""Update our field to a new beam."""
 		print beam.type, beam.fwhm/utils.degree, self.map.extent()/utils.degree
-		map = update_beam(self.map[None], [0], beam, self.beam, apod=apod, moo=True)[0]
+		map = update_beam(self.map[None], [0], beam, self.beam, apod=apod)[0]
 		return Field(self.name, map, self.spec, beam, order=self.order)
 	def __call__(self, freq):
 		return enmap.samewcs(self.spec(freq, self.map), self.map)
@@ -640,4 +629,5 @@ def add_patch(patches, isky, ibtype, patch):
 		patches[isky][ibtype] = patch
 	else:
 		patches[isky][ibtype].map += patch.map
-
+def capped_ratio(a,b, cap=1):
+	return np.minimum(a/b,cap)

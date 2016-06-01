@@ -32,11 +32,15 @@ subsample_method = "gauss"
 # calculation.
 chunk_size    = 4e5
 bounds_skip   = 13
-bounds_niter  = 7
-beam_nsigma   = 1
-patch_res     = 0.05
-patch_nsub    = 10
-patch_pad     = 8.0
+bounds_niter  = 5
+# Sensitive to beam_nsigma even when not doing any smoothing
+# or apodization at that stage. Going from 3 to 4 took my
+# residuals from 1.0e-6 to 3.6e-6.
+beam_nsigma   = 6
+patch_res     = 0.2
+patch_nsub    = 5
+patch_pad     = 10
+patch_apod    = 0.6
 
 # The detectors
 dets = [

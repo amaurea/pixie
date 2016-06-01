@@ -126,7 +126,7 @@ def freq_geometry(fmax, nfreq):
 	wcs.wcs.ctype[0] = 'FREQ'
 	return wcs
 
-def longitude_geometry(box, res=0.1*utils.degree, dims=()):
+def longitude_geometry(box, res=0.1*utils.degree, dims=(), ref=None):
 	"""Produce a longitudinal geometry, which follows a stripe around a line
 	of longitude, and is approximately flat in this strip. box is [{from,to},{dec,ra}],
 	but the ra bounds only apply along dec=0 - elsewhere they will be larger."""
@@ -140,6 +140,13 @@ def longitude_geometry(box, res=0.1*utils.degree, dims=()):
 	# which it shouldn't be.
 	dec0, ra0 = np.mean(box,0)
 	wdec, wra = box[1]-box[0]
+	if ref is not None:
+		# It may be useful to have ra0 and dec0 at an integer number of
+		# unrotated CAR pixels from some reference point
+		dec0 = np.round((dec0 - ref[0])/res)*res + ref[0]
+		ra0  = np.round((ra0  - ref[1])/res)*res + ref[1]
+		wdec = np.ceil(np.abs(wdec)/(2*res))*2*res*np.sign(wdec)
+		wra  = np.ceil(np.abs(wra) /(2*res))*2*res*np.sign(wra)
 	wcs = enlib.wcs.WCS(naxis=2)
 	wcs.wcs.ctype = ['RA---CAR','DEC--CAR']
 	wcs.wcs.cdelt = [res*np.sign(wdec),res*np.sign(wra)]
@@ -182,18 +189,20 @@ def longitude_band_bounds(point, step=1, niter=10):
 		# Transform the points. Since cdelt = 1, these new
 		# pixel coordinates will correspond to flat-sky angles
 		x, y = wcs.wcs_world2pix(point[0], point[1], 0)
+		# We want to be symmetric around phiref
+		phiwidth = max(np.abs(y))
 		box = np.array([
-			[thetaref+np.min(x),phiref-np.max(y)],
-			[thetaref+np.max(x),phiref-np.min(y)]])
+			[thetaref+np.min(x),phiref-phiwidth],
+			[thetaref+np.max(x),phiref+phiwidth]])
 		phiref -= np.mean(y)
 	return box*utils.degree
 
 def subsample_geometry(shape, wcs, nsub):
 	owcs = wcs.deepcopy()
-	owcs.wcs.crpix -= 0.5
+	#owcs.wcs.crpix -= 0.5
 	owcs.wcs.crpix *= nsub
 	owcs.wcs.cdelt /= nsub
-	owcs.wcs.crpix += 0.5
+	#owcs.wcs.crpix += 0.5
 	oshape = tuple(shape[:-2]) + tuple(np.array(shape[-2:])*nsub)
 	return oshape, owcs
 
@@ -203,6 +212,19 @@ def pad_geometry(shape, wcs, pad):
 	owcs.wcs.crpix += pad_pix
 	oshape = tuple(shape[:-2]) + tuple(np.array(shape[-2:])+2*pad_pix)
 	return oshape, owcs
+
+def overlap_cat(arrays, axis=-1, n=1):
+	"""Given a list of arrays [:][...,nsamp], where each array has n overlap with the
+	previous. Return the concatenation of the arrays along the last dimension after
+	discarding overlapping samples and adding offsets needed to make those samples match."""
+	work = [arrays[0]]
+	for array in arrays[1:]:
+		a = utils.moveaxis(work[-1],axis,-1)
+		b = utils.moveaxis(array,   axis,-1)
+		off = np.mean(b[...,:n]-a[...,-n:],-1)
+		c = b[...,n:] - off[...,None]
+		work.append(utils.moveaxis(c, -1, axis))
+	return np.concatenate(work,axis)
 
 def sim_cmb_map(shape, wcs, powspec, ps_unit=1e-6, lmax=None, seed=None, T_monopole=None, verbose=False, beta=None, aberr_dir=None, oversample=2):
 	"""Simulate lensed cmb map with the given [phi,T,E,B]-ordered
