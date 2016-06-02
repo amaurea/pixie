@@ -153,7 +153,6 @@ class PixieSim:
 		# 2*pad because the argument to widen_box is the total increase in width, not
 		# the radius.
 		box   = utils.widen_box(box, 2*pad, relative=False)
-		print "box", box/utils.degree
 		# Actually generate the geometry
 		return  longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,), ref=(0,0))
 
@@ -776,7 +775,6 @@ def longitude_geometry(box, res=0.1*utils.degree, dims=(), ref=None):
 		ra0  = np.round((ra0  - ref[1])/res)*res + ref[1]
 		wdec = np.ceil(np.abs(wdec)/(2*res))*2*res*np.sign(wdec)
 		wra  = np.ceil(np.abs(wra) /(2*res))*2*res*np.sign(wra)
-	print "ra0", ra0, "dec0", dec0, "wra", wra, "wdec", wdec
 	wcs = enlib.wcs.WCS(naxis=2)
 	wcs.wcs.ctype = ['RA---CAR','DEC--CAR']
 	wcs.wcs.cdelt = [res*np.sign(wdec),res*np.sign(wra)]
@@ -786,11 +784,6 @@ def longitude_geometry(box, res=0.1*utils.degree, dims=(), ref=None):
 	wcs.wcs.latpole = 0
 	nra  = int(round(abs(wra/res)))
 	ndec = int(round(abs(wdec/res)))
-	print "ctype", wcs.wcs.ctype
-	print "cdelt", wcs.wcs.cdelt
-	print "crval", wcs.wcs.crval
-	print "crpix", wcs.wcs.crpix
-	print "nra", nra, "ndec", ndec
 	return dims + (nra+1,ndec+1), wcs
 
 def longitude_band_bounds(point, step=1, niter=10):
@@ -800,13 +793,6 @@ def longitude_band_bounds(point, step=1, niter=10):
 	# First find the minimum abs theta. That side of the sky will be our reference.
 	imin  = np.argmin(np.abs(point[1]))
 	phiref, thetaref = point[:,imin]
-	# Find first point that's twice as close to one of the poles.
-	# We will use this to define the reference pole
-	pdist  = 90-np.abs(point[1])
-	closer = np.where(pdist < pdist[imin]/2)[0]
-	# If there is no such point, just use the one with the highest value
-	imid = closer[0] if len(closer) > 0 else np.argmin(pdist)
-	theta_closer = point[1,imid]
 	# Our first esimate of the center phi is inaccurate,
 	# so iterate to get a better mean.
 	for i in range(niter):
@@ -817,10 +803,7 @@ def longitude_band_bounds(point, step=1, niter=10):
 		wcs.wcs.crval = [phiref,0]
 		wcs.wcs.crpix = [-thetaref+1,1]
 		wcs.wcs.latpole = 0
-		if theta_closer > 0:
-			wcs.wcs.lonpole =  90
-		else:
-			wcs.wcs.lonpole = -90
+		wcs.wcs.lonpole =  90
 		# Transform the points. Since cdelt = 1, these new
 		# pixel coordinates will correspond to flat-sky angles
 		x, y = wcs.wcs_world2pix(point[0], point[1], 0)
