@@ -24,6 +24,10 @@ nfreq         = 2048
 lmax          = 5000
 nl            = 1000
 
+# The optical filter
+filter_method = "scatter"
+filter_freq   = 1.5e12
+
 # These affect memory use and accuracy
 subsample_num = 5
 subsample_method = "gauss"

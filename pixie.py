@@ -1,10 +1,12 @@
-import numpy as np, h5py, astropy.io.fits, copy, enlib.wcs, warnings
+import numpy as np, h5py, astropy.io.fits, copy, enlib.wcs, warnings, logging
 from enlib import enmap, bunch, utils, bench, powspec, fft, sharp, coordinates, curvedsky, lensing, aberration
+L = logging.getLogger(__name__)
 
 ##### The main simulator class #####
 
 class PixieSim:
 	def __init__(self, config):
+		"""Initialize a Pixie TOD simulator from the given configuration object."""
 		# Pointing
 		self.pointgen      = PointingGenerator(**config.__dict__)
 		self.sample_period = config.sample_period
@@ -71,6 +73,7 @@ class PixieSim:
 		nsamp  = len(samples)
 		ctimes = self.ref_ctime + np.asarray(samples)*float(self.sample_period)
 		for i in range(0, nsamp, self.chunk_size):
+			L.debug("chunk %3d" % i)
 			# +1 for the extra overlap-sample, which we will use to remove
 			# any discontinuities caused by interpolation issues.
 			mytimes = ctimes[i:i+self.chunk_size+1]
@@ -87,20 +90,20 @@ class PixieSim:
 		orientation = self.pointgen.calc_orientation(elements)
 		# Prepare the input spectrogram patches
 		patches = [[None for btype in self.beam_types] for sky in self.skies]
-		with bench.show("get_patch_bounds"):
+		with bench.mark("get_patch_bounds"):
 			shape, wcs = self.get_patch_bounds(orientation)
 		for isky, sky in enumerate(self.skies):
 			for ifield, field in enumerate(sky):
-				with bench.show("field.project"):
+				with bench.mark("field.project"):
 					subfield = calc_subfield(field, shape, wcs, self.refbeam,
 							subsample=self.patch_nsub, pad=self.patch_pad, apod=self.patch_apod)
 				for ibtype, btype in enumerate(self.beam_types):
-					with bench.show("calc_specmap"):
+					with bench.mark("calc_specmap"):
 						specmap = calc_specmap(subfield, self.freqs, btype, apod=self.patch_apod)
-					with bench.show("calc_spectrogram"):
+					with bench.mark("calc_spectrogram"):
 						pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
 					# This should be elsewhere
-					with bench.show("prefilter"):
+					with bench.mark("prefilter"):
 						pmap = enmap.samewcs(np.ascontiguousarray(np.rollaxis(pmap,1)),pmap)
 						pmap = utils.interpol_prefilter(pmap, npre=1, order=3)
 					add_patch(patches, isky, ibtype, Patch(pmap, wcs_delay))
@@ -110,13 +113,13 @@ class PixieSim:
 		for ibarrel, barrel in enumerate(self.barrels):
 			for isub, subbeam in enumerate(barrel.subbeams):
 				patch = patches[barrel.sky][subbeam.type]
-				with bench.show("calc_pointing"):
+				with bench.mark("calc_pointing"):
 					point = self.pointgen.calc_pointing(orientation, elements.delay, subbeam.offset)
-				with bench.show("calc_pixels"):
+				with bench.mark("calc_pixels"):
 					pix   = calc_pixels(point.angpos, point.delay, patch.wcs, patch.wcs_delay)
-				with bench.show("calc_response"):
+				with bench.mark("calc_response"):
 					resp  = calc_response(point.gamma, subbeam.response, ibarrel) # [nhorn,{dc,delay},...]
-				with bench.show("calc_horn_signal"):
+				with bench.mark("calc_horn_signal"):
 					for ihorn in range(self.nhorn):
 						horn_sig[ihorn] += calc_horn_signal(patch.map, pix, resp[ihorn])
 				# Save pointing and pixels for TOD output
@@ -124,7 +127,7 @@ class PixieSim:
 				pix_all.append(pix)
 		# Read off each detector's response
 		det_sig = np.zeros([self.ndet,len(ctimes)])
-		with bench.show("calc_det_signal"):
+		with bench.mark("calc_det_signal"):
 			for idet, det in enumerate(self.dets):
 				det_sig[idet] = calc_det_signal(horn_sig[det.horn], det.response)
 		# output result as a PixieTOD
@@ -143,7 +146,7 @@ class PixieSim:
 		bsize = max([beam_type.fwhm for beam_type in self.beam_types])*utils.fwhm
 		# Reduce by amount already smoothed. Since fwhms are just approximate,
 		# cap to 1/4 of the original beam for the purposes of finding the padding area
-		bsize = (np.max((bsize/4)**2, bsize**2-self.refbeam.fwhm**2))**0.5
+		bsize = (np.maximum((bsize/4)**2, bsize**2-self.refbeam.fwhm**2))**0.5
 		pad   = rmax + bsize*self.beam_nsigma + self.patch_apod
 		# Get a (hopefully) representative subset of the pointing as angular coordinates
 		zvec  = orientation.T[:,2,::self.bounds_skip]
@@ -617,6 +620,23 @@ def parse_barrel(params):
 def parse_det(params):
 	return bunch.Bunch(horn=int(params["horn"]), response=np.array(params["response"]))
 
+def parse_ints(s): return parse_numbers(s, int)
+def parse_floats(s): return parse_numbers(s, float)
+def parse_numbers(s, dtype=None):
+	res = []
+	for word in s.split(","):
+		toks = [float(w) for w in word.split(":")]
+		if ":" not in word:
+			res.append(toks[:1])
+		else:
+			start, stop = toks[:2]
+			step = toks[2] if len(toks) > 2 else 1
+			res.append(np.arange(start,stop,step))
+	res = np.concatenate(res)
+	if dtype is not None:
+		res = res.astype(dtype)
+	return res
+
 ##### Helpers #####
 Tcmb= 2.725
 h   = 6.626070040e-34
@@ -915,3 +935,13 @@ def project_healpix(shape, wcs, healmap, rot=None, verbose=False):
 		if verbose: print "rotating polarization"
 		res[1:3] = enmap.rotate_pol(res[1:3], psi)
 	return res
+
+def load_config(path=None):
+	"""Load the configuration at the given path, or the at
+	the same location as pixie.py if none is specified. Returns
+	the configuration object."""
+	if path:
+		config = imp.load_source("config", path)
+	else:
+		import config
+	return config
