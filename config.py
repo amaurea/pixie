@@ -1,10 +1,6 @@
 # Unix time for sample 0
 ref_ctime     = 1500000000
 sample_period = 1./256
-# The optical delay due to the mirror stroke
-delay_period  = 8
-delay_amp     = 0.01
-delay_phase   = 0
 # The spin about the axis
 spin_period   = 60
 spin_phase    = 0
@@ -17,6 +13,10 @@ orbit_period  = 365.25636*24*3600
 orbit_phase   = 0
 orbit_step    = scan_period
 eclip_angle   = 0
+# The optical delay due to the mirror stroke
+delay_period  = spin_period/8.0
+delay_amp     = 0.01
+delay_phase   = 0
 
 # Frequencies
 fmax          = 7.4e12
@@ -29,12 +29,12 @@ filter_method = "scatter"
 filter_freq   = 1.5e12
 
 # These affect memory use and accuracy
-subsample_num = 5
+subsample_num = 7
 subsample_method = "gauss"
 
 # These affect sub-patches used in the spectrogram
 # calculation.
-chunk_size    = 4e5
+chunk_size    = 3e5
 bounds_skip   = 13
 bounds_niter  = 5
 # Sensitive to beam_nsigma even when not doing any smoothing

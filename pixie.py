@@ -73,7 +73,7 @@ class PixieSim:
 		nsamp  = len(samples)
 		ctimes = self.ref_ctime + np.asarray(samples)*float(self.sample_period)
 		for i in range(0, nsamp, self.chunk_size):
-			L.debug("chunk %3d" % i)
+			L.debug("chunk %3d/%d" % (i/self.chunk_size, (nsamp+self.chunk_size-1)/self.chunk_size))
 			# +1 for the extra overlap-sample, which we will use to remove
 			# any discontinuities caused by interpolation issues.
 			mytimes = ctimes[i:i+self.chunk_size+1]
@@ -93,6 +93,8 @@ class PixieSim:
 		with bench.mark("get_patch_bounds"):
 			shape, wcs = self.get_patch_bounds(orientation)
 		for isky, sky in enumerate(self.skies):
+			# Skip skies that aren't in use
+			if not any([barrel.sky == isky for barrel in self.barrels]): continue
 			for ifield, field in enumerate(sky):
 				with bench.mark("field.project"):
 					subfield = calc_subfield(field, shape, wcs, self.refbeam,
@@ -325,8 +327,8 @@ def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
 	"""Maps pointing to pixels[{pix_dc, pix_delay, pix_y, pix_x},ntime]."""
 	ntime = angpos.shape[-1]
 	pix = np.zeros([4,ntime])
-	pix[0]  = wcs_delay.wcs_world2pix([0], 1)[0]
-	pix[1]  = wcs_delay.wcs_world2pix(np.abs(delay), 1)[0]
+	pix[0]  = wcs_delay.wcs_world2pix([0], 0)[0]
+	pix[1]  = wcs_delay.wcs_world2pix(np.abs(delay), 0)[0]
 	# angpos is [{phi,theta},ntime], but world2pix wants [:,{phi,theta}] in degrees
 	pdeg = angpos.T / utils.degree
 	# The result will be [:,{x,y}], but we want [{y,x},ntime]
