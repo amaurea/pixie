@@ -960,7 +960,6 @@ def froll(a, shift, axis=-1, noft=False, inplace=False):
 	k     = np.fft.fftfreq(fa.shape[axis])
 	# Expand indices so we broadcast correctly
 	k     = k[(None,)*(axis)+(slice(None),)+(None,)*(fa.ndim-axis-1)]
-	print k.shape
 	phase = np.exp(-2j*np.pi*k*shift)
 	fa   *= phase
 	if noft:
