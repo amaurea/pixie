@@ -1,4 +1,4 @@
-import numpy as np, h5py, astropy.io.fits, copy, enlib.wcs, warnings, logging
+import numpy as np, h5py, astropy.io.fits, copy, enlib.wcs, warnings, logging, imp
 from enlib import enmap, bunch, utils, bench, powspec, fft, sharp, coordinates, curvedsky, lensing, aberration
 L = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ def read_tod(fname):
 	with h5py.File(fname, "r") as hfile:
 		for key in ["signal","elements","point","pix"]:
 			if key in hfile:
-				data[key] = tod[key].value
+				data[key] = hfile[key].value
 	return PixieTOD(**data)
 
 ##### Signal #####
@@ -947,3 +947,25 @@ def load_config(path=None):
 	else:
 		import config
 	return config
+
+def froll(a, shift, axis=-1, noft=False, inplace=False):
+	"""Roll array elements along the given axis. Unlike np.roll,
+	the shift can be fractional. Fourier shifting is used for this.
+	If noft is True, the input and output arrays will be assumed to
+	already be in fourier domain. Otherwise, the fourier transform
+	is performed internally."""
+	if not inplace: a = np.asanyarray(a).copy()
+	axis %= a.ndim
+	fa    = a if noft else fft.fft(a, axes=(axis,))
+	k     = np.fft.fftfreq(fa.shape[axis])
+	# Expand indices so we broadcast correctly
+	k     = k[(None,)*(axis)+(slice(None),)+(None,)*(fa.ndim-axis-1)]
+	print k.shape
+	phase = np.exp(-2j*np.pi*k*shift)
+	fa   *= phase
+	if noft:
+		a = fa
+	else:
+		tmp = fft.ifft(fa, axes=(axis,), normalize=True)
+		a   = tmp if np.iscomplexobj(a) else tmp.real
+	return a

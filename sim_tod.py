@@ -1,4 +1,4 @@
-import numpy as np, argparse, pixie, imp
+import numpy as np, argparse, pixie
 from enlib import mpi, utils, log
 parser = argparse.ArgumentParser()
 parser.add_argument("orbits")
