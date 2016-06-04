@@ -1,0 +1,5 @@
+*.hdf
+*.fits
+*.png
+inputs/
+old/
