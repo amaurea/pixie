@@ -1,4 +1,4 @@
-import numpy as np, h5py, astropy.io.fits, copy, enlib.wcs, warnings, logging, imp
+import numpy as np, h5py, astropy.io.fits, copy, enlib.wcs, warnings, logging, imp, scipy.signal
 from enlib import enmap, bunch, utils, bench, powspec, fft, sharp, coordinates, curvedsky, lensing, aberration
 L = logging.getLogger(__name__)
 
@@ -271,6 +271,7 @@ class PointingGenerator:
 	def __init__(self, **kwargs):
 		self.delay_amp    = kwargs["delay_amp"]
 		self.delay_period = kwargs["delay_period"]
+		self.delay_shape  = kwargs["delay_shape"]
 		self.delay_phase  = kwargs["delay_phase"]*utils.degree
 		self.spin_period  = kwargs["spin_period"]
 		self.spin_phase   = kwargs["spin_phase"]*utils.degree
@@ -289,7 +290,11 @@ class PointingGenerator:
 		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
 		ang_spin  = self.spin_phase    + 2*np.pi*t/self.spin_period
 		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
-		delay     = self.delay_amp * np.sin(ang_delay)
+		if self.delay_shape == "sin":
+			delay = self.delay_amp * np.sin(ang_delay)
+		elif self.delay_shape == "triangle":
+			delay = self.delay_amp * scipy.signal.sawtooth(ang_delay+np.pi/2, 0.5)
+		else: raise ValueError("Unrecognized delay shape '%s'" % self.delay_shape)
 		return bunch.Bunch(ctime=ctime, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, ang_delay=ang_delay, delay=delay)
 	def calc_orientation(self, elements):
 		"""Compute a rotation matrix representing the orientation of the
@@ -701,9 +706,7 @@ def spec2delay(arr, wcs, axis=0, inplace=False, bsize=32):
 		for bi in range(nb):
 			i1, i2 = bi*bsize, min(n,(bi+1)*bsize)
 			aflat[i1:i2] = fft.redft00(aflat[i1:i2]) * 0.5
-	owcs = wcs.deepcopy()
-	owcs.wcs.cdelt[0] = c/wcs.wcs.cdelt[0]/nfreq/2
-	owcs.wcs.ctype[0] = 'TIME'
+	owcs = wcs_spec2delay(wcs, nfreq)
 	# Take into account the units on the x-axis
 	arr *= wcs.wcs.cdelt[0]
 	return arr, owcs
@@ -722,10 +725,20 @@ def delay2spec(arr, wcs, axis=0, inplace=False, bsize=32):
 			i1, i2 = bi*bsize, min(n,(bi+1)*bsize)
 			aflat[i1:i2] = fft.redft00(aflat[i1:i2]*2, normalize=True)
 	# Update our wcs
+	owcs = wcs_delay2spec(wcs, ndelay)
+	return arr, owcs
+
+def wcs_delay2spec(wcs, ndelay):
 	owcs = wcs.deepcopy()
 	owcs.wcs.cdelt[0] = c/wcs.wcs.cdelt[0]/ndelay/2
 	owcs.wcs.ctype[0] = 'FREQ'
-	return arr, owcs
+	return owcs
+
+def wcs_spec2delay(wcs, nfreq):
+	owcs = wcs.deepcopy()
+	owcs.wcs.cdelt[0] = c/wcs.wcs.cdelt[0]/nfreq/2
+	owcs.wcs.ctype[0] = 'TIME'
+	return owcs
 
 def read_map(fname, hdu=0):
 	m = enmap.read_map(fname)

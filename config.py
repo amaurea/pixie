@@ -14,6 +14,7 @@ orbit_phase   = 0
 orbit_step    = scan_period
 eclip_angle   = 0
 # The optical delay due to the mirror stroke
+delay_shape   = "triangle"
 delay_period  = spin_period/8.0
 delay_amp     = 0.01
 delay_phase   = 0
