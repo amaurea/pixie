@@ -2,11 +2,33 @@ import numpy as np, h5py, astropy.io.fits, copy, enlib.wcs, warnings, logging, i
 from enlib import enmap, bunch, utils, bench, powspec, fft, sharp, coordinates, curvedsky, lensing, aberration
 L = logging.getLogger(__name__)
 
-##### The main simulator class #####
+##### The main simulator classes #####
+
+# Simulation steps:
+# 1. Optics and detector inputs (current PixieSim)
+# 2. Subsequent processing before readout
+# Step #2 includes the tod filter and noise generation,
+# and any glitches and frequency spikes, etc.
+# This would make sense as a separate class, which doesn't
+# need to care about all the difficulties with the optics.
+#
+# Sensible names for these?
+# 1. OpticsSim
+# 2. ReadoutSim
 
 class PixieSim:
+	"""Top-level class that implements the whole TOD simulation process."""
 	def __init__(self, config):
-		"""Initialize a Pixie TOD simulator from the given configuration object."""
+		self.optics_sim  = OpticsSim(config)
+		self.readout_sim = ReadoutSim(config)
+	def sim_tod(self, i):
+		tod = self.optics_sim.gen_tod_orbit(i)
+		tod = self.readout_sim.sim_readout(tod)
+		return tod
+
+class OpticsSim:
+	def __init__(self, config):
+		"""Initialize a Pixie Optics simulator from the given configuration object."""
 		# Pointing
 		self.pointgen      = PointingGenerator(**config.__dict__)
 		self.sample_period = config.sample_period
@@ -59,9 +81,7 @@ class PixieSim:
 		at the start of an orbit, the cut from one orbit to the next
 		will happen in the middle of these tods. We assume that there
 		is an integer number of samples in an orbit."""
-		# +1 to generate a sample of overlap with the next orbit, which is
-		# useful for discontinuity detection and fixing.
-		samples = np.arange(i*self.nsamp_orbit,(i+1)*self.nsamp_orbit+1)
+		samples = np.arange(i*self.nsamp_orbit,(i+1)*self.nsamp_orbit)
 		return self.gen_tod_samples(samples)
 	def gen_tod_samples(self, samples):
 		"""Generate time ordered data for the given sample indices.
@@ -161,6 +181,31 @@ class PixieSim:
 		# Actually generate the geometry
 		return  longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,), ref=(0,0))
 
+class ReadoutSim:
+	"""This class handles the signal from it has hit the detectors and until
+	it is read out. This is stuff like the tod highpass and lowpass, noise
+	injection, glitches, etc."""
+	def __init__(self, config):
+		self.filters = [parse_tod_filter(f) for f in config.tod_filters]
+	def sim_readout(self, tod):
+		"""The main function, which applies all the readout effects, returning
+		the TOD one would actually see."""
+		# Only the frequency filter for now
+		tod = self.apply_filters(tod)
+		return tod
+	def apply_filters(self, tod):
+		res  = tod.copy()
+		# Prepare our fourier space. All filters are assumed to be defined
+		# in fourier space.
+		dt   = (tod.elements[0,-1]-tod.elements[0,0])/(tod.nsamp-1)
+		freqs= fft.rfftfreq(tod.nsamp, dt)
+		fsig = fft.rfft(res.signal)
+		# Actually apply the filters
+		for f in self.filters:
+			fsig = f(fsig, freqs)
+		fft.ifft(fsig, res.signal, normalize=True)
+		return res
+
 ##### TOD container #####
 
 # What members should we have in the TOD? The minimum is signal for each detector
@@ -170,12 +215,21 @@ class PixieSim:
 # point[nbeam,{phi,theta,gamma},nsamp], pix[nbeam,{y,x,delay},nsamp]
 
 class PixieTOD:
-	"""Container for Pixie TODs."""
+	"""Container for Pixie TODs. Contains
+	signal[ndet,nsamp]
+	elements[{ctime,orbit,scan,spin,selay},nsamp]
+	point[{phi,theta,gamma},nsamp] (optional)
+	pix[{idelay,y,x},nsamp] (optional)."""
 	def __init__(self, signal, elements, point=None, pix=None):
 		self.signal   = np.array(signal)
 		self.elements = np.array(elements)
 		self.point    = np.array(point) if point is not None else None
 		self.pix      = np.array(pix)   if pix   is not None else None
+	def copy(self): return PixieTOD(self.signal, self.elements, point=self.point, pix=self.pix)
+	@property
+	def ndet(self): return self.signal.shape[0]
+	@property
+	def nsamp(self): return self.signal.shape[1]
 
 def downsample_tod_blockwise(tod, weights):
 		"""Return a new PixieTOD where the samples have been downsampled according
@@ -494,6 +548,20 @@ class BeamGauss(Beam):
 		res[:] = np.exp(-0.5*l**2*(self.fwhm**2/(8*np.log(2))))
 		return res
 
+class BeamGaussScatter:
+	type = "gauss_scatter"
+	def __init__(self, fwhm, freq_cut):
+		self.fwhm     = fwhm
+		self.freq_cut = freq_cut
+	def __call__(self, freq, l):
+		freq, l = np.asarray(freq), np.asarray(l)
+		lres = np.exp(-0.5*l**2*(self.fwhm**2/(8*np.log(2))))
+		# Not sure that this is the right formula for the
+		# scattering.
+		fres = np.exp(-(freq/self.freq_cut)**2)
+		res = fres[(Ellipsis,)+(None,)*lres.ndim] * lres
+		return res
+
 class BeamRaster(Beam):
 	type = "raster"
 	def __init__(self, vals, fmax, nfreq, lmax, nl):
@@ -506,7 +574,8 @@ class BeamRaster(Beam):
 		idown = np.where(mvals<np.exp(-0.5))[0]
 		idown = idown[0] if len(idown) > 0 else self.nl
 		ldown = idown*float(lmax)/nl
-		self.fwhm = (8*np.log(2))**0.5/ldown
+		with utils.nowarn():
+			self.fwhm = (8*np.log(2))**0.5/ldown
 	def __call__(self, freq, l):
 		# Interpolate the beam value
 		freq, l = np.asarray(freq), np.asarray(l)
@@ -558,6 +627,22 @@ def calc_reference_beam(beams, fmax, nfreq, lmax, nl):
 	refbeam = smallest_beam_raster(beams)
 	refbeam = smallest_beam_freq(refbeam)
 	return refbeam
+
+##### Filters #####
+
+class Filter:
+	def __call__(self, ftod, freqs): return ftod
+
+class FilterButter:
+	def __init__(self, fknee, alpha):
+		"""Butterworth filter. Positive alpha gives lowpass filter,
+		negative alpha gives highpass fitler."""
+		self.fknee = fknee
+		self.alpha = alpha
+	def __call__(self, ftod, freqs):
+		with utils.nowarn():
+			profile = 1/(1+(freqs/self.fknee)**self.alpha)
+		return ftod * profile
 
 ##### Containers #####
 
@@ -612,6 +697,8 @@ def parse_beam(params):
 		return Beam()
 	elif params["type"] is "gauss":
 		return BeamGauss(params["fwhm"]*utils.degree)
+	elif params["type"] is "gauss_scatter":
+		return BeamGaussScatter(params["fwhm"]*utils.degree, params["freq_cut"])
 	else:
 		raise ValueError("Unknown beam type '%s'" % params["type"])
 
@@ -626,6 +713,12 @@ def parse_barrel(params):
 
 def parse_det(params):
 	return bunch.Bunch(horn=int(params["horn"]), response=np.array(params["response"]))
+
+def parse_tod_filter(params):
+	if params["type"] is "none":
+		return Filter()
+	elif params["type"] is "butter":
+		return FilterButter(params["fknee"], params["alpha"])
 
 def parse_ints(s): return parse_numbers(s, int)
 def parse_floats(s): return parse_numbers(s, float)

@@ -1,5 +1,5 @@
 import numpy as np, argparse, pixie, h5py, enlib.wcs
-from enlib import enmap, utils, interpol, cg as encg
+from enlib import enmap, utils, interpol, cg as encg, fft
 parser = argparse.ArgumentParser()
 parser.add_argument("tod")
 parser.add_argument("odir")
@@ -92,7 +92,14 @@ freq = swcs.wcs_pix2world(np.arange(spec.shape[-1]),0)[0]
 hfile["spec"] = spec
 hfile["freq"] = freq
 
+# Fourier-decompose spin
+fd = fft.rfft(d, axes=[1])
+dcomp = np.array([fd[:,0].real,fd[:,2].real,fd[:,2].imag])
 
+hfile["dcomp"] = dcomp
+# And spectra from this
+scomp, _ = pixie.delay2spec(dcomp[:,0,0], dwcs, axis=-1)
+hfile["scomp"] = scomp
 
 
 hfile.close()

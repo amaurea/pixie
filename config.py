@@ -25,9 +25,11 @@ nfreq         = 2048
 lmax          = 5000
 nl            = 1000
 
-# The optical filter
-filter_method = "scatter"
-filter_freq   = 1.5e12
+# Time-domain filter
+tod_filters = [
+		{"type":"butter", "fknee":0.01, "alpha":-5},
+		{"type":"butter", "fknee":100,  "alpha":+5}
+	]
 
 # These affect memory use and accuracy
 subsample_num = 7
@@ -65,7 +67,7 @@ barrels = [
 # The beams
 beam_types = [
 	# Standard frequency-independent Gaussian
-	{"type": "gauss", "fwhm": 1.9}
+	{"type": "gauss_scatter", "fwhm": 1.9, "freq_cut": 1.5e12}
 ]
 
 # The skies

@@ -18,6 +18,6 @@ utils.mkdir(args.odir)
 for ind in range(comm.rank, len(orbits), comm.size):
 	orbit = orbits[ind]
 	L.info("orbit %3d" % orbit)
-	tod   = sim.gen_tod_orbit(orbit)
+	tod   = sim.sim_tod(orbit)
 	pixie.write_tod(args.odir + "/tod%03d.hdf" % orbit, tod)
 	del tod
