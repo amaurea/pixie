@@ -4,6 +4,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("idir", nargs="?", default="inputs")
 parser.add_argument("odir", nargs="?", default="imaps")
 parser.add_argument("-r", "--res", type=float, default=0.1)
+parser.add_argument("--refsys-res",type=float, default=10)
 args = parser.parse_args()
 
 # Generate the inputs to our simulator, which should be enmaps.
@@ -12,7 +13,7 @@ res = args.res*utils.degree
 shape, wcs = pixie.fullsky_geometry(res, dims=(3,))
 
 print colors.green + "Simulating reference blackbody" + colors.reset
-rshape, rwcs = pixie.fullsky_geometry(np.pi/2, dims=(3,))
+rshape, rwcs = pixie.fullsky_geometry(args.refsys_res*utils.degree, dims=(3,))
 map_ref = pixie.sim_reference_blackbody(rshape, rwcs)
 extra = { "NAME": "REFERENCE", "BEAM": "NONE", "SPEC": "BLACK" }
 enmap.write_map(args.odir + "/map_ref.fits", map_ref, extra=extra)

@@ -13,9 +13,9 @@ fmax   = 7.4e12
 nfreq  = 512
 
 tod = pixie.read_tod(args.tod)
-d   = tod.signal[0,:-1]
+d   = tod.signal[0]
 d   = d.reshape(-1,nspin,ndelay)
-delay = tod.elements[4,:-1].reshape(-1,nspin,ndelay)
+delay = tod.elements[4].reshape(-1,nspin,ndelay)
 
 hfile = h5py.File("test.hdf","w")
 hfile["d"] = d
@@ -87,7 +87,7 @@ hfile["d3"] = d
 hfile["delay"] = delay
 
 # Try to recover first spectrum
-spec, swcs = pixie.delay2spec(d[0,0,0], dwcs)
+spec, swcs = pixie.delay2spec(d, dwcs, axis=-1)
 freq = swcs.wcs_pix2world(np.arange(spec.shape[-1]),0)[0]
 hfile["spec"] = spec
 hfile["freq"] = freq
@@ -98,7 +98,7 @@ dcomp = np.array([fd[:,0].real,fd[:,2].real,fd[:,2].imag])
 
 hfile["dcomp"] = dcomp
 # And spectra from this
-scomp, _ = pixie.delay2spec(dcomp[:,0,0], dwcs, axis=-1)
+scomp, _ = pixie.delay2spec(dcomp, dwcs, axis=-1)
 hfile["scomp"] = scomp
 
 

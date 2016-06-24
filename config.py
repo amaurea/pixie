@@ -60,7 +60,7 @@ dets = [
 # The barrels
 I = [[1,0,0],[0,1,0],[0,0,1]]
 barrels = [
-	{"sky": 0, "subbeams": [ {"type": 0, "offset": [0,0,0], "response": I} ] },
+	{"sky": 1, "subbeams": [ {"type": 0, "offset": [0,0,0], "response": I} ] },
 	{"sky": 0, "subbeams": [ {"type": 0, "offset": [0,0,0], "response": I} ] },
 ]
 

@@ -2,6 +2,20 @@ import numpy as np, h5py, astropy.io.fits, copy, enlib.wcs, warnings, logging, i
 from enlib import enmap, bunch, utils, bench, powspec, fft, sharp, coordinates, curvedsky, lensing, aberration
 L = logging.getLogger(__name__)
 
+# We currently use a normal fits WCS to set up the local patches along
+# each chunk of the scan. A problem with this is that the coordinates
+# still change rapidly around the pole even if the pixels don't. That
+# leads to Q and U looking like quadrupoles around the pole, and hence
+# makes it difficult to apply beam smoothing.
+#
+# Could either
+# 1. Introduce a special case for polarization angles, rotating
+#    them to be relative to the local y axis.
+# 2. Map the whole chunk system to the equator via an extra
+#    coordinate rotation.
+# Both of these require an extra piece of information to be passed
+# with the shape,wcs that defines the patch.
+
 ##### The main simulator classes #####
 
 # Simulation steps:
@@ -489,7 +503,7 @@ class Field:
 		"""Project our values onto a patch with the given shape and wcs. Returns
 		a new Field."""
 		pos = enmap.posmap(shape, wcs)
-		map = enmap.ndmap(self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False),wcs)
+		map = enmap.ndmap(self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False, safe=False),wcs)
 		return Field(self.name, map, self.spec, self.beam, self.order)
 	def to_beam(self, beam, apod=0):
 		"""Update our field to a new beam."""
