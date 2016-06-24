@@ -77,7 +77,7 @@ class OpticsSim:
 		self.dets = [parse_det(det) for det in config.dets]
 
 		# Skies. Each sky is a list of fields, such as cmb or dust
-		self.skies = [[read_field(field) for field in sky] for sky in config.skies]
+		self.skies = [[polrot_field(read_field(field)) for field in sky] for sky in config.skies]
 
 		# Computed
 		self.ncomp       = 3
@@ -394,6 +394,8 @@ class PointingGenerator:
 		angpos[0] = utils.rewind(angpos[0])
 		# Get the polarization orientation on the sky
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
+		# Apply our extra polarization rotation
+		gamma += angpos[0]
 		return bunch.Bunch(angpos=angpos, gamma=gamma, delay=delay, pos=zvec)
 
 def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
@@ -473,6 +475,19 @@ def read_field(fname):
 	else: raise ValueError("Beam type '%s' not recognized" % beam_type)
 	return Field(name.lower(), map, spec, beam)
 
+def polrot_field(field):
+	"""Apply a global polarization rotation to the given field to make
+	it easier to smooth and interpolate. We apply the polarization rotation
+	psi += phi, where phi is the longitude coordinate and psi is the polarization
+	angle. This unwraps the polarization quadrupole we get around each pole.
+	This rotation must be undone elsewhere before we can read off the true signal.
+	Becase the polarization angle now is phi higher than it should be, the read-out
+	code must add phi to its psi too."""
+	theta, phi = field.map.posmap()
+	map = field.map.copy()
+	map[1:3] = enmap.rotate_pol(map[1:3], phi)
+	return Field(field.name, map, field.spec, field.beam)
+
 def calc_subfield(field, shape, wcs, target_beam, subsample=1, pad=0, apod=0):
 	"""Given a field, compute its value on a new grid given by shape and wcs,
 	smoothing it to the target_beam. The smoothing is done on a subsampled
@@ -503,7 +518,7 @@ class Field:
 		"""Project our values onto a patch with the given shape and wcs. Returns
 		a new Field."""
 		pos = enmap.posmap(shape, wcs)
-		map = enmap.ndmap(self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False, safe=False),wcs)
+		map = enmap.ndmap(self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False, safe=False, mode="wrap"),wcs)
 		return Field(self.name, map, self.spec, self.beam, self.order)
 	def to_beam(self, beam, apod=0):
 		"""Update our field to a new beam."""
