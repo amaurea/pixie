@@ -10,7 +10,7 @@ scan_period   = 384*spin_period
 scan_phase    = 90
 # And the solar orbit
 orbit_period  = 365.25636*24*3600
-orbit_phase   = 0
+orbit_phase   = 90
 orbit_step    = scan_period
 eclip_angle   = 0
 # The optical delay due to the mirror stroke

@@ -73,21 +73,29 @@ dstep = delay[0,0,1]-delay[0,0,0]
 dwcs = enlib.wcs.WCS(naxis=1)
 dwcs.wcs.ctype[0] = 'TIME'
 dwcs.wcs.cdelt[0] = dstep
-dwcs.wcs.crpix[0] = dstep
+dwcs.wcs.crpix[0] = 1
 
 # Split into left-going and right-going scan and positive and negative frequencies
-d = d.reshape(-1,nspin,nblock,bsize)
-delay = delay.reshape(-1,nspin,nblock,bsize)
-
-# Reorder all spectrograms to standard 0-high delay order
-for i in range(1,nblock,2):
-	d[:,:,i]     = d[:,:,i,::-1]
-	delay[:,:,i] = delay[:,:,i,::-1]
+#d = d.reshape(-1,nspin,nblock,bsize)
+#delay = delay.reshape(-1,nspin,nblock,bsize)
+#
+### Reorder all spectrograms to standard 0-high delay order
+#for i in range(1,nblock,2):
+#	d[:,:,i]     = d[:,:,i,::-1]
+#	delay[:,:,i] = delay[:,:,i,::-1]
+#d = d.reshape(-1,nspin,nblock*bsize)
 hfile["d3"] = d
 hfile["delay"] = delay
 
+def stroke2spec(arr, wcs):
+	ndelay = arr.shape[-1]
+	spec   = fft.rfft(arr,axes=[-1]).real[...,::2]*2/ndelay
+	owcs   = pixie.wcs_delay2spec(wcs, ndelay/4)
+	return spec, owcs
+
 # Try to recover first spectrum
-spec, swcs = pixie.delay2spec(d, dwcs, axis=-1)
+#spec, swcs = pixie.delay2spec(d, dwcs, axis=-1)
+spec, swcs = stroke2spec(d, dwcs)
 freq = swcs.wcs_pix2world(np.arange(spec.shape[-1]),0)[0]
 hfile["spec"] = spec
 hfile["freq"] = freq
@@ -98,7 +106,8 @@ dcomp = np.array([fd[:,0].real,fd[:,2].real,fd[:,2].imag])
 
 hfile["dcomp"] = dcomp
 # And spectra from this
-scomp, _ = pixie.delay2spec(dcomp, dwcs, axis=-1)
+#scomp, _ = pixie.delay2spec(dcomp, dwcs, axis=-1)
+scomp, _ = stroke2spec(dcomp, dwcs)
 hfile["scomp"] = scomp
 
 
