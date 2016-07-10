@@ -2,7 +2,7 @@ import numpy as np, argparse, pixie, h5py, enlib.wcs
 from enlib import enmap, utils, interpol, cg as encg, fft
 parser = argparse.ArgumentParser()
 parser.add_argument("tod")
-parser.add_argument("odir")
+parser.add_argument("ofile")
 args = parser.parse_args()
 
 bsize  = 480
@@ -17,10 +17,8 @@ d   = tod.signal[0]
 d   = d.reshape(-1,nspin,ndelay)
 delay = tod.elements[4].reshape(-1,nspin,ndelay)
 
-hfile = h5py.File("test.hdf","w")
+hfile = h5py.File(args.ofile,"w")
 hfile["d"] = d
-
-# FIXME: Should ensure periodicity at this point.
 
 def fix_fourier(d):
 	# Adjust phase to compensate for sky motion during a spin
@@ -29,34 +27,6 @@ def fix_fourier(d):
 	## Adjust phase to compensate for spin during strokes
 	d  = pixie.froll(d, np.arange(ndelay)[None,None,:]/float(ndelay),1)
 	return d
-
-def fix_fourier2(d):
-	# Adjust phase to compensate for sky motion during a spin
-	nt,nspin,ndelay = d.shape
-	# Here we roll along the time axis for each [spin,delay]-cell. This is periodic because
-	# d[0+nt,sub] = d[nt*nsub+sub] = d[N+sub] = d[sub] = d[0,sub]
-	d = pixie.froll(d.reshape(-1,nspin*ndelay), np.arange(nspin*ndelay)/float(nspin*ndelay), 0).reshape(-1,nspin,ndelay)
-	# Here we roll along the spin axis for each [t,delay].
-	# d[t,0+nspin,delay] = d[t*nspin*ndelay + nspin*ndelay + delay] =
-	# d[(t+1)*nspin*ndelay + delay] = d[t+1,0,delay]
-	# If all we had were the underlying guarantee that d as a whole is periodic, then
-	# a shift in the spin direction is non-periodic. But since we have already corrected
-	# for the drift, each spin cycle *should* be periodic after all. So padding would just
-	# make things worse.
-	dnext = np.roll(d, 1,0)
-	dprev = np.roll(d,-1,0)
-	dpad = np.concatenate([d,dnext,dnext[::-1],d[::-1],dprev[::-1],dprev],1)
-	dpad = pixie.froll(dpad, np.arange(ndelay)[None,None,:]/float(ndelay),1)
-	d    = dpad[:,:nspin]
-	return d
-
-def fix_bicubic(d):
-	# Position of unshifted array into shifted array
-	nt,nspin,ndelay = d.shape
-	inds = np.mgrid[:nt,:nspin,:ndelay].astype(float)
-	inds[0] += dir*(inds[1]+inds[2]/ndelay)/nspin
-	inds[1] += dir*inds[2]/ndelay
-	return interpol.map_coordinates(d, inds, order=3, border="cyclic").reshape(-1)
 
 d  = fix_fourier(d)
 hfile["d2"] = d

@@ -1103,3 +1103,20 @@ def froll(a, shift, axis=-1, noft=False, inplace=False):
 		tmp = fft.ifft(fa, axes=(axis,), normalize=True)
 		a   = tmp if np.iscomplexobj(a) else tmp.real
 	return a
+
+def fix_drift(d):
+	"""Given d[...,nt,nspin,ndelay], where d represents data changing
+	smoothingly both as a function time and spin in 1 dimension (e.g.
+	between one step in the last axis both t and spin change slightly),
+	shift the array such that the axes become independent in the sense
+	taht t and spin only change when one their respective index changes."""
+	# Adjust phase to compensate for sky motion during a spin
+	nt,nspin,ndelay = d.shape[-3:]
+	d = froll(
+			d.reshape(-1,nt,nspin*ndelay),
+			np.arange(nspin*ndelay)/float(nspin*ndelay),
+			-2).reshape(-1,nt,nspin,ndelay)
+	## Adjust phase to compensate for spin during strokes
+	d  = froll(d, np.arange(ndelay)[(None,)*(d.ndim-1)+(slice(None),)]/float(ndelay),-2)
+	return d
+
