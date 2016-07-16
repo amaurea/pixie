@@ -113,7 +113,9 @@ class OpticsSim:
 			mytimes = ctimes[i:i+self.chunk_size+1]
 			subtimes, weights = subsample(mytimes, self.subsample_num, self.subsample_method)
 			subtod  = self.gen_tod_raw(subtimes)
-			mytod   = downsample_tod_blockwise(subtod, weights)
+			with bench.mark("downsample"):
+				mytod   = downsample_tod_blockwise(subtod, weights)
+			del subtod, subtimes, weights, mytimes
 			tods.append(mytod)
 		return concatenate_tod(tods)
 	def gen_tod_raw(self, ctimes):
@@ -122,30 +124,9 @@ class OpticsSim:
 		should usually not be called directly."""
 		elements    = self.pointgen.calc_elements(ctimes)
 		orientation = self.pointgen.calc_orientation(elements)
-		# Prepare the input spectrogram patches
-		patches = [[None for btype in self.beam_types] for sky in self.skies]
-		with bench.mark("get_patch_bounds"):
-			shape, wcs = self.get_patch_bounds(orientation)
-		for isky, sky in enumerate(self.skies):
-			# Skip skies that aren't in use
-			if not any([barrel.sky == isky for barrel in self.barrels]): continue
-			for ifield, field in enumerate(sky):
-				with bench.mark("field.project"):
-					subfield = calc_subfield(field, shape, wcs, self.refbeam,
-							subsample=self.patch_nsub, pad=self.patch_pad, apod=self.patch_apod)
-				for ibtype, btype in enumerate(self.beam_types):
-					with bench.mark("calc_specmap"):
-						specmap = calc_specmap(subfield, self.freqs, btype, apod=self.patch_apod)
-					with bench.mark("calc_spectrogram"):
-						pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
-					# This should be elsewhere
-					with bench.mark("prefilter"):
-						pmap = enmap.samewcs(np.ascontiguousarray(np.rollaxis(pmap,1)),pmap)
-						pmap = utils.interpol_prefilter(pmap, npre=1, order=3)
-					add_patch(patches, isky, ibtype, Patch(pmap, wcs_delay))
+		patches     = self.calc_patch_signal(orientation)
 		# Add up the signal contributions to each horn
 		horn_sig  = np.zeros([self.nhorn,self.ncomp,len(ctimes)])
-		point_all, pix_all = [], []
 		for ibarrel, barrel in enumerate(self.barrels):
 			for isub, subbeam in enumerate(barrel.subbeams):
 				patch = patches[barrel.sky][subbeam.type]
@@ -153,25 +134,25 @@ class OpticsSim:
 					point = self.pointgen.calc_pointing(orientation, elements.delay, subbeam.offset)
 				with bench.mark("calc_pixels"):
 					pix   = calc_pixels(point.angpos, point.delay, patch.wcs, patch.wcs_delay)
+					del point.angpos, point.delay
 				with bench.mark("calc_response"):
 					resp  = calc_response(point.gamma, subbeam.response, ibarrel) # [nhorn,{dc,delay},...]
+					del point
 				with bench.mark("calc_horn_signal"):
 					for ihorn in range(self.nhorn):
 						horn_sig[ihorn] += calc_horn_signal(patch.map, pix, resp[ihorn])
-				# Save pointing and pixels for TOD output
-				point_all.append(point)
-				pix_all.append(pix)
+					del pix, resp
+		del patches, orientation
 		# Read off each detector's response
 		det_sig = np.zeros([self.ndet,len(ctimes)])
 		with bench.mark("calc_det_signal"):
 			for idet, det in enumerate(self.dets):
 				det_sig[idet] = calc_det_signal(horn_sig[det.horn], det.response)
+		del horn_sig
 		# output result as a PixieTOD
 		return PixieTOD(
 				signal   = det_sig,
-				elements = [elements.ctime, elements.orbit, elements.scan, elements.spin, elements.delay],
-				point    = [[point.angpos[0],point.angpos[1],point.gamma] for point in point_all],
-				pix      = [pix[1:] for pix in pix_all])
+				elements = [elements.ctime, elements.orbit, elements.scan, elements.spin, elements.delay])
 	def get_patch_bounds(self, orientation):
 		"""Return the (shape,wcs) geometry needed for simulating the sky at the
 		given orientation, including any beam offsets and a margin to allow for
@@ -194,6 +175,31 @@ class OpticsSim:
 		box   = utils.widen_box(box, 2*pad, relative=False)
 		# Actually generate the geometry
 		return  longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,), ref=(0,0))
+	def calc_patch_signal(self, orientation):
+		# Prepare the input spectrogram patches
+		patches = [[None for btype in self.beam_types] for sky in self.skies]
+		with bench.mark("get_patch_bounds"):
+			shape, wcs = self.get_patch_bounds(orientation)
+		for isky, sky in enumerate(self.skies):
+			# Skip skies that aren't in use
+			if not any([barrel.sky == isky for barrel in self.barrels]): continue
+			for ifield, field in enumerate(sky):
+				with bench.mark("field.project"):
+					subfield = calc_subfield(field, shape, wcs, self.refbeam,
+							subsample=self.patch_nsub, pad=self.patch_pad, apod=self.patch_apod)
+				for ibtype, btype in enumerate(self.beam_types):
+					with bench.mark("calc_specmap"):
+						specmap = calc_specmap(subfield, self.freqs, btype, apod=self.patch_apod)
+					with bench.mark("calc_spectrogram"):
+						pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
+						del specmap
+					# This should be elsewhere
+					with bench.mark("prefilter"):
+						pmap = enmap.samewcs(np.ascontiguousarray(np.rollaxis(pmap,1)),pmap)
+						pmap = utils.interpol_prefilter(pmap, npre=1, order=3)
+					add_patch(patches, isky, ibtype, Patch(pmap, wcs_delay))
+				del subfield, pmap
+		return patches
 
 class ReadoutSim:
 	"""This class handles the signal from it has hit the detectors and until
@@ -245,16 +251,23 @@ class PixieTOD:
 	@property
 	def nsamp(self): return self.signal.shape[1]
 
-def downsample_tod_blockwise(tod, weights):
+def downsample_tod_blockwise(tod, weights, bsize=0x1000):
 		"""Return a new PixieTOD where the samples have been downsampled according
 		to weights[nsub], such that the result is nsub times shorter."""
 		# This may break for quantities with angle cuts!
 		def dmean(a):
 			if a is not None:
-				return np.sum(a.reshape(a.shape[:-1]+(-1,weights.size))*weights,-1)
+				a   = a.reshape(a.shape[:-1] + (-1, weights.size))
+				nsub= a.shape[-2]
+				res = np.zeros(a.shape[:-1])
+				for i1 in range(0, nsub, bsize):
+					i2 = min(i1+bsize,nsub)
+					res[...,i1:i2] = np.sum(a[...,i1:i2,:]*weights,-1)
+				return res
+				#return np.sum(a.reshape(a.shape[:-1]+(-1,weights.size))*weights,-1)
 		def dmid(a):
 			if a is not None:
-				return a[...,len(weights)/2::len(weights)]
+				return a[...,len(weights)/2::len(weights)].copy()
 		return PixieTOD(dmean(tod.signal), dmid(tod.elements), dmid(tod.point), dmid(tod.pix))
 
 def concatenate_tod(tods):
@@ -269,7 +282,9 @@ def write_tod(fname, tod):
 	with h5py.File(fname, "w") as hfile:
 		for key in ["signal","elements","point","pix"]:
 			try:
-				hfile[key] = getattr(tod, key)
+				data = getattr(tod, key)
+				if data is None: continue
+				hfile[key] = data
 			except AttributeError: pass
 
 def read_tod(fname):
@@ -299,35 +314,39 @@ def calc_horn_signal(pmap, pix, horn_resp, order=3):
 	sig_horn += np.einsum("abt,bt->at", horn_resp[1], sig_delay)
 	return sig_horn
 
-def calc_response(gamma, beam_resp, bidx):
+def calc_response(gamma, beam_resp, bidx, bsize=0x10000):
 	"""Calculate the response matrix transforming TQU on the sky
 	seen through barrel #bidx, to TQU entering each horn,
 	after taking coordinate transformations, interferometric mixing
 	and beam responsitivity into account. beam_resp is [{TQU},{TQU}].
 	"""
 	ntime, nhorn, ncomp = gamma.size, 2, 3
-	A, B = bidx, 1-bidx
-	u = np.full(ntime, 1.0)
-	o = np.zeros(ntime)
-	c = np.cos(2*gamma)
-	s = np.sin(2*gamma)
-	# First apply the sky rotation
-	R = np.array([
-		[ u, o, o],
-		[ o, c,-s],
-		[ o, s, c]])
-	# Then apply the beam response
-	R = np.einsum("ab,bct->act", beam_resp, R)
-	# And then the interferometry:
-	# I = 1/4*(Ii + Ij)[0] + 1/4*(Ii - Ij)[delta]
-	# Q = 1/4*(Qi - Qj)[0] + 1/4*(Qi + Qj)[delta]
-	# U = 1/4*(Ui - Uj)[0] + 1/4*(Ui + Uj)[delta]
 	res = np.zeros([nhorn, 2, ncomp, ncomp, ntime])
-	T, Q, U  = R
-	res[A,0] = [ T, Q, U] # me, DC
-	res[A,1] = [ T, Q, U] # me, delay
-	res[B,0] = [ T,-Q,-U] # other, DC
-	res[B,1] = [-T, Q, U] # other, delay
+	A, B = bidx, 1-bidx
+	# Calc in chunks to save memory
+	for i1 in range(0, ntime, bsize):
+		i2   = min(i1+bsize,ntime)
+		u = np.full(i2-i1, 1.0)
+		o = np.zeros(i2-i1)
+		c = np.cos(2*gamma[i1:i2])
+		s = np.sin(2*gamma[i1:i2])
+		# First apply the sky rotation
+		R = np.array([
+			[ u, o, o],
+			[ o, c,-s],
+			[ o, s, c]])
+		del u,o,c,s
+		# Then apply the beam response
+		R = np.einsum("ab,bct->act", beam_resp, R)
+		# And then the interferometry:
+		# I = 1/4*(Ii + Ij)[0] + 1/4*(Ii - Ij)[delta]
+		# Q = 1/4*(Qi - Qj)[0] + 1/4*(Qi + Qj)[delta]
+		# U = 1/4*(Ui - Uj)[0] + 1/4*(Ui + Uj)[delta]
+		T, Q, U  = R
+		res[A,0,:,:,i1:i2] = [ T, Q, U] # me, DC
+		res[A,1,:,:,i1:i2] = [ T, Q, U] # me, delay
+		res[B,0,:,:,i1:i2] = [ T,-Q,-U] # other, DC
+		res[B,1,:,:,i1:i2] = [-T, Q, U] # other, delay
 	res /= 4
 	return res
 
@@ -1120,3 +1139,12 @@ def fix_drift(d):
 	d  = froll(d, np.arange(ndelay)[(None,)*(d.ndim-1)+(slice(None),)]/float(ndelay),-2)
 	return d
 
+def rot_comps(d, ang, axis=0, off=None):
+	if off is None: off = d.shape[axis]-2
+	c = np.cos(ang)
+	s = np.sin(ang)
+	res = d.copy()
+	pre = (slice(None),)*axis
+	res[pre+(off+0,)] = d[pre+(off+0,)] * c - d[pre+(off+1,)] * s
+	res[pre+(off+1,)] = d[pre+(off+0,)] * s + d[pre+(off+1,)] * c
+	return res

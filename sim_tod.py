@@ -1,11 +1,12 @@
 import numpy as np, argparse, pixie
-from enlib import mpi, utils, log
+from enlib import mpi, utils, log, fft
 parser = argparse.ArgumentParser()
 parser.add_argument("orbits")
 parser.add_argument("odir")
 parser.add_argument("-C", "--config", type=str, default=None)
 args = parser.parse_args()
 
+fft.engine = "fftw"
 orbits = pixie.parse_ints(args.orbits)
 comm   = mpi.COMM_WORLD
 L      = log.init(rank=comm.rank, shared=False, level='DEBUG')

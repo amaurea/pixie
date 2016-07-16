@@ -1,5 +1,5 @@
 import numpy as np, argparse, pixie, h5py, enlib.wcs, os
-from enlib import enmap, utils, fft, mpi
+from enlib import enmap, utils, fft, mpi, bunch
 parser = argparse.ArgumentParser()
 parser.add_argument("tods", nargs="+")
 parser.add_argument("odir")
@@ -7,6 +7,7 @@ parser.add_argument("-C", "--config", type=str, default=None)
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
+fft.engine = "fftw"
 
 # We assume that each input tod corresponds to a single ring.
 # For each tod we will produce the map along the ring it
@@ -45,19 +46,30 @@ def dump(pre, d):
 		hfile["data"] = d
 
 for fname in args.tods[comm.rank::comm.size]:
+	print fname
 	tod = pixie.read_tod(fname)
 	pre = args.odir + "/" + os.path.basename(fname)[:-4]
-	# Center our coordinate system on our column
-	phi = tod.point[0,0,0]/utils.degree
-	wcs.wcs.crpix[0] = 1 - phi/wcs.wcs.cdelt[0]
+	# Center our coordinate system on our column. We didn't save
+	# the pointing, so we have to compute it from the elements
+	e     = tod.elements[:,:10]
+	elem  = bunch.Bunch(ctime=e[0], orbit=e[1], scan=e[2], spin=e[3], delay=e[4])
+	pgen  = pixie.PointingGenerator(**config.__dict__)
+	orient= pgen.calc_orientation(elem)
+	point = pgen.calc_pointing(orient, elem.delay, np.array([0,0,0]))
+	phi   = point.angpos[0,0]
+	gamma0= point.gamma[0]
+	wcs.wcs.crpix[0] = 1 - phi/utils.degree/wcs.wcs.cdelt[0]
 	# Ger out tod samples
 	d   = tod.signal
 	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
 	# Undo the effect of drift in theta and spin during each stroke
 	d   = pixie.fix_drift(d)
-	# Fourier-decompose the spin
+	# Fourier-decompose the spin. The details of this should depend on the
+	# barrel and detector configuration. Signs here are weird.
 	fd  = fft.rfft(d, axes=[2])
-	d   = np.array([fd[:,:,0].real, fd[:,:,2].real, -fd[:,:,2].imag])
+	d   = np.array([-fd[:,:,0].real, fd[:,:,2].real, -fd[:,:,2].imag])
+	# Rotate polarization. Why is this needed?  Why is it spin 4?
+	d   = pixie.rot_comps(d, -gamma0*4, 0)
 	# Go from stroke to spectrum
 	d   = fft.rfft(d).real[...,::2]*2/ndelay
 	# Reorder from [stokes,det,theta,phi,freq] to [det,freq,stokes,theta,phi]
