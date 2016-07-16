@@ -64,12 +64,11 @@ for fname in args.tods[comm.rank::comm.size]:
 	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
 	# Undo the effect of drift in theta and spin during each stroke
 	d   = pixie.fix_drift(d)
-	# Fourier-decompose the spin. The details of this should depend on the
-	# barrel and detector configuration. Signs here are weird.
-	fd  = fft.rfft(d, axes=[2])
-	d   = np.array([-fd[:,:,0].real, fd[:,:,2].real, -fd[:,:,2].imag])
-	# Rotate polarization. Why is this needed?  Why is it spin 4?
-	d   = pixie.rot_comps(d, -gamma0*4, 0)
+	# Fourier-decompose the spin. *2 for pol because <sin^2> = 0.5.
+	fd  = fft.rfft(d, axes=[2])/d.shape[2]
+	d   = np.array([fd[:,:,0].real, fd[:,:,2].real*2, -fd[:,:,2].imag*2])
+	## Rotate polarization. Why is this needed?  Why is it spin 4?
+	#d   = pixie.rot_comps(d, -gamma0*4, 0)
 	# Go from stroke to spectrum
 	d   = fft.rfft(d).real[...,::2]*2/ndelay
 	# Reorder from [stokes,det,theta,phi,freq] to [det,freq,stokes,theta,phi]
