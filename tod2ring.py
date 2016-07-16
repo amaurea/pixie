@@ -55,9 +55,9 @@ for fname in args.tods[comm.rank::comm.size]:
 	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
 	# Undo the effect of drift in theta and spin during each stroke
 	d   = pixie.fix_drift(d)
-	# Fourier-decompose the spin
-	fd  = fft.rfft(d, axes=[2])
-	d   = np.array([fd[:,:,0].real, fd[:,:,2].real, -fd[:,:,2].imag])
+	# Fourier-decompose the spin. *2 for pol because <sin^2> = 0.5.
+	fd  = fft.rfft(d, axes=[2])/d.shape[2]
+	d   = np.array([fd[:,:,0].real, fd[:,:,2].real*2, -fd[:,:,2].imag*2])
 	# Go from stroke to spectrum
 	d   = fft.rfft(d).real[...,::2]*2/ndelay
 	# Reorder from [stokes,det,theta,phi,freq] to [det,freq,stokes,theta,phi]

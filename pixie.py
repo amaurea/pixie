@@ -394,8 +394,8 @@ class PointingGenerator:
 		angpos[0] = utils.rewind(angpos[0])
 		# Get the polarization orientation on the sky
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
-		# Apply our extra polarization rotation
-		gamma += angpos[0]
+		# Apply our extra polarization rotation. See polrot_field.
+		gamma -= angpos[0]
 		return bunch.Bunch(angpos=angpos, gamma=gamma, delay=delay, pos=zvec)
 
 def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
