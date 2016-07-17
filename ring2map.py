@@ -39,7 +39,7 @@ for ifile in args.rings[comm.rank::comm.size]:
 	m = enmap.read_map(ifile)[args.det]
 	nring = m.shape[-2]
 	theta,  phi   = m.pix2sky([0,0])
-	itheta, iphi  = omap.sky2pix([theta,phi]).astype(int)
+	itheta, iphi  = np.round(omap.sky2pix([theta,phi])).astype(int)
 	itheta = itheta + np.arange(nring)
 	iphi   = iphi   + np.arange(nring)*0
 	# Wrap onto sky

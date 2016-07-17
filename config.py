@@ -9,18 +9,20 @@ opening_angle = 0
 scan_period   = 384*spin_period
 scan_phase    = 90
 # And the solar orbit
-orbit_period  = 365.25636*24*3600
+#orbit_period  = 365.25636*24*3600
+# Reduced orbital period to make sims less oversampled
+orbit_period  = scan_period*scan_period/spin_period
 orbit_phase   = 90
 orbit_step    = scan_period
 eclip_angle   = 0
 # The optical delay due to the mirror stroke
 delay_shape   = "triangle"
 delay_period  = spin_period/8.0
-delay_amp     = 0.01
+delay_amp     = 0.01040303
 delay_phase   = 0
 
 # Frequencies
-fmax          = 7.4e12
+fmax          = 7377.3568e9
 nfreq         = 2048
 lmax          = 5000
 nl            = 1000
@@ -60,8 +62,8 @@ dets = [
 # The barrels
 I = [[1,0,0],[0,1,0],[0,0,1]]
 barrels = [
-	{"sky": 1, "subbeams": [ {"type": 0, "offset": [0,0,0], "response": I} ] },
 	{"sky": 0, "subbeams": [ {"type": 0, "offset": [0,0,0], "response": I} ] },
+	{"sky": 1, "subbeams": [ {"type": 0, "offset": [0,0,0], "response": I} ] },
 ]
 
 # The beams
