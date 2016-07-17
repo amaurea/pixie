@@ -867,6 +867,7 @@ def delay2spec(arr, wcs, axis=0, inplace=False, bsize=32):
 			aflat[i1:i2] = fft.redft00(aflat[i1:i2]*2, normalize=True)
 	# Update our wcs
 	owcs = wcs_delay2spec(wcs, ndelay)
+	arr /= owcs.wcs.cdelt[0]
 	return arr, owcs
 
 def wcs_delay2spec(wcs, ndelay):
