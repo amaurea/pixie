@@ -37,7 +37,7 @@ if args.apply_beam:
 	# Smooth manually using full-sky geometry
 	for field in fields:
 		print field.name
-		minfo = sharp.map_info_fejer1(field.map.shape[-2], field.map.shape[-1])
+		minfo = sharp.map_info_clenshaw_curtis(field.map.shape[-2], field.map.shape[-1])
 		ainfo = sharp.alm_info(lmax=beam_lmax)
 		sht   = sharp.sht(minfo, ainfo)
 		alm   = np.zeros((3,ainfo.nelem),dtype=complex)
@@ -62,6 +62,10 @@ if args.apply_beam:
 	maps = [map*scatter[:,None,None,None] for map in maps]
 maps.insert(0, np.sum(maps,0))
 maps = enmap.samewcs(np.array(maps), maps[1])
+
+# At this point we have a factor 4 higher values than our full
+# tod simulation. There is also a pixel shift issue, but that
+# should be simple.
 
 if args.unit:
 	if args.unit == "cmb":

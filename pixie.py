@@ -350,6 +350,9 @@ def calc_response(gamma, beam_resp, bidx, bsize=0x10000):
 		res[A,1,:,:,i1:i2] = [ T, Q, U] # me, delay
 		res[B,0,:,:,i1:i2] = [ T,-Q,-U] # other, DC
 		res[B,1,:,:,i1:i2] = [-T, Q, U] # other, delay
+	# This factor 4 is what we actually measure, but we
+	# must remember to take it into account when making maps.
+	# It's effectively part of the gain of the instrument.
 	res /= 4
 	return res
 

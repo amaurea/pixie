@@ -14,12 +14,13 @@ hdu   = fitsio.open(args.rings[0])[0]
 wcs   = enlib.wcs.WCS(hdu.header)
 shape = hdu.data.shape
 dtype = np.float32
+atpole= True
 
 ndet, nfreq, ncomp, ntheta, nphi = shape
 nphi    = int(np.ceil(360 / wcs.wcs.cdelt[0]))
 # Rings cover 360 degrees, but those are split into two
-# columns in our image.
-ntheta /= 2
+# columns in our image. The poles are part of both sides.
+ntheta = ntheta/2 + atpole
 
 # We want our output coordinate system to be centered on the equator
 # rather than beginning there. So offset crpix for theta
@@ -44,14 +45,24 @@ for ifile in args.rings[comm.rank::comm.size]:
 	iphi   = iphi   + np.arange(nring)*0
 	# Wrap onto sky
 	bad = itheta >= ntheta
-	itheta[bad] = 2*ntheta - itheta[bad] - 1
+	itheta[bad] = 2*ntheta - itheta[bad] - 1 - atpole
 	iphi  [bad] = iphi[bad] + nphi/2
 	bad = itheta < 0
-	itheta[bad] = -itheta[bad]
+	itheta[bad] = -itheta[bad] -1 + atpole
 	iphi  [bad] = iphi[bad] + nphi/2
 	iphi %= nphi
-	omap[:,:,itheta,iphi] = m[:,:,:,0]
+	#theta = theta + np.arange(nring)*360./nring
+	#for i in range(nring):
+	#	print "%4d %7.3f %4d %4d" % (i, theta[i], itheta[i], ntheta)
+	#1/0
+	omap[:,:,itheta,iphi] += m[:,:,:,0]
 	hits[itheta,iphi] += 1
+	# Copy over poles
+	if atpole:
+		for t in [0,ntheta-1]:
+			i = np.where(itheta == t)[0]
+			omap[:,:,itheta[i],(iphi[i]+nphi/2)%nphi] += m[:,:,i,0]
+			hits[itheta[i],(iphi[i]+nphi/2)%nphi] += 1
 
 omap = utils.allreduce(omap, comm)
 hits = utils.allreduce(hits, comm)
