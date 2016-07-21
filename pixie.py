@@ -121,10 +121,10 @@ class OpticsSim:
 	def gen_tod_raw(self, ctimes):
 		"""Generate the time-ordered data for the sample times given in ctimes.
 		No oversampling is done, nor is chunking. This is a helper function that
-		should usually not be called directly."""
+		should usually not be called directly. The result has units W/sr/m^2."""
 		elements    = self.pointgen.calc_elements(ctimes)
 		orientation = self.pointgen.calc_orientation(elements)
-		patches     = self.calc_patch_signal(orientation)
+		patches     = self.calc_patch_signal(orientation) # W/sr/m^2
 		# Add up the signal contributions to each horn
 		horn_sig  = np.zeros([self.nhorn,self.ncomp,len(ctimes)])
 		for ibarrel, barrel in enumerate(self.barrels):
@@ -176,6 +176,7 @@ class OpticsSim:
 		# Actually generate the geometry
 		return  longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,), ref=(0,0))
 	def calc_patch_signal(self, orientation):
+		"""Computes the per-patch interferograms in units W/sr/m^2."""
 		# Prepare the input spectrogram patches
 		patches = [[None for btype in self.beam_types] for sky in self.skies]
 		with bench.mark("get_patch_bounds"):
@@ -189,8 +190,10 @@ class OpticsSim:
 							subsample=self.patch_nsub, pad=self.patch_pad, apod=self.patch_apod)
 				for ibtype, btype in enumerate(self.beam_types):
 					with bench.mark("calc_specmap"):
+						# W/sr/m^2/Hz
 						specmap = calc_specmap(subfield, self.freqs, btype, apod=self.patch_apod)
 					with bench.mark("calc_spectrogram"):
+						# W/sr/m^2
 						pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
 						del specmap
 					# This should be elsewhere
@@ -347,6 +350,9 @@ def calc_response(gamma, beam_resp, bidx, bsize=0x10000):
 		res[A,1,:,:,i1:i2] = [ T, Q, U] # me, delay
 		res[B,0,:,:,i1:i2] = [ T,-Q,-U] # other, DC
 		res[B,1,:,:,i1:i2] = [-T, Q, U] # other, delay
+	# This factor 4 is what we actually measure, but we
+	# must remember to take it into account when making maps.
+	# It's effectively part of the gain of the instrument.
 	res /= 4
 	return res
 
@@ -439,7 +445,8 @@ def calc_spectrogram(specmap, wcs_freq):
 def calc_specmap(field, freqs, beam, apod=0):
 	"""Compute the observed spectrum for the given field, taking
 	into account the observed beam and correcting for the beam present
-	in the field data."""
+	in the field data. Returns an enmap specmap[nfreq,ncomp,ny,nx] in
+	normal Spec units (W/sr/m^2/Hz)"""
 	specmap = field(freqs)
 	specmap = update_beam(specmap, freqs, beam, field.beam, apod=apod)
 	return specmap
@@ -544,6 +551,9 @@ class Field:
 		map = update_beam(self.map[None], [0], beam, self.beam, apod=apod)[0]
 		return Field(self.name, map, self.spec, beam, order=self.order)
 	def __call__(self, freq):
+		"""Evaluate the field signal at the given frequencies, returning a
+		stack of enmaps. The result will have the same unit as self.spec uses,
+		which is usually SI units of spectral radiance: W/sr/m^2/Hz."""
 		return enmap.samewcs(self.spec(freq, self.map), self.map)
 
 ##### Spectrum types #####
@@ -837,7 +847,10 @@ def graybody(freqs, T, beta, deriv=False):
 def spec2delay(arr, wcs, axis=0, inplace=False, bsize=32):
 	"""Converts a spectrum cube arr[nfreq,...] into an
 	autocorrelation function [delay,...]. The frequency
-	information is described by the spectral wcs argument."""
+	information is described by the spectral wcs argument.
+	Returns corrfun, delay_wcs. If the input units are
+	W/sr/m^2/Hz, then the output units will be
+	W/sr/m^2."""
 	arr = np.asanyarray(arr)
 	if not inplace: arr = arr.copy()
 	with utils.flatview(arr, [axis], "rw") as aflat:
@@ -848,14 +861,16 @@ def spec2delay(arr, wcs, axis=0, inplace=False, bsize=32):
 			i1, i2 = bi*bsize, min(n,(bi+1)*bsize)
 			aflat[i1:i2] = fft.redft00(aflat[i1:i2]) * 0.5
 	owcs = wcs_spec2delay(wcs, nfreq)
-	# Take into account the units on the x-axis
+	# Take into account the units on the x-axis.
 	arr *= wcs.wcs.cdelt[0]
 	return arr, owcs
 
 def delay2spec(arr, wcs, axis=0, inplace=False, bsize=32):
 	"""Converts an autocorrelation cube arr[ndelay,...] into an
 	autocorrelation function [delay,...]. The delay
-	information is described by the temporal wcs argument."""
+	information is described by the temporal wcs argument.
+	If the input units are W/sr/m^2, then the output units will
+	be W/sr/m^2/Hz."""
 	arr = np.asanyarray(arr)
 	if not inplace: arr = arr.copy()
 	with utils.flatview(arr, [axis], "rw") as aflat:

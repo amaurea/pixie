@@ -47,6 +47,7 @@ def dump(pre, d):
 
 for fname in args.tods[comm.rank::comm.size]:
 	print fname
+	# Read the tod. tod.signal has units W/sr/m^2.
 	tod = pixie.read_tod(fname)
 	pre = args.odir + "/" + os.path.basename(fname)[:-4]
 	# Center our coordinate system on our column. We didn't save
@@ -57,20 +58,20 @@ for fname in args.tods[comm.rank::comm.size]:
 	orient= pgen.calc_orientation(elem)
 	point = pgen.calc_pointing(orient, elem.delay, np.array([0,0,0]))
 	phi   = point.angpos[0,0]
-	gamma0= point.gamma[0]
 	wcs.wcs.crpix[0] = 1 - phi/utils.degree/wcs.wcs.cdelt[0]
+	# Detector measures 1/4 of the signal due to how the interferrometry
+	# is set up.
+	gain  = 1.0/4
 	# Ger out tod samples
-	d   = tod.signal
+	d   = tod.signal / gain
 	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
 	# Undo the effect of drift in theta and spin during each stroke
 	d   = pixie.fix_drift(d)
 	# Fourier-decompose the spin. *2 for pol because <sin^2> = 0.5.
 	fd  = fft.rfft(d, axes=[2])/d.shape[2]
 	d   = np.array([fd[:,:,0].real, fd[:,:,2].real*2, -fd[:,:,2].imag*2])
-	## Rotate polarization. Why is this needed?  Why is it spin 4?
-	#d   = pixie.rot_comps(d, -gamma0*4, 0)
-	# Go from stroke to spectrum
-	d   = fft.rfft(d).real[...,::2]*2/ndelay
+	# Go from stroke to spectrum. This takes us to W/sr/m^2/Hz
+	d   = fft.rfft(d).real[...,::2]*2/ndelay/dfreq
 	# Reorder from [stokes,det,theta,phi,freq] to [det,freq,stokes,theta,phi]
 	d   = d[:,:,:,None,:]
 	d   = utils.moveaxes(d, (1,4,0,2,3), (0,1,2,3,4))
@@ -78,4 +79,4 @@ for fname in args.tods[comm.rank::comm.size]:
 	# Output as a ring file
 	m   = enmap.enmap(d, wcs, copy=False)
 	enmap.write_map(pre + ".fits", m)
-	dump(pre, d)
+	#dump(pre, d)

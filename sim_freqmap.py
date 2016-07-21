@@ -67,6 +67,10 @@ if args.apply_beam:
 maps.insert(0, np.sum(maps,0))
 maps = enmap.samewcs(np.array(maps), maps[1])
 
+# At this point we have a factor 4 higher values than our full
+# tod simulation. There is also a pixel shift issue, but that
+# should be simple.
+
 if args.unit:
 	if args.unit == "cmb":
 		# CMB uK equivalent
