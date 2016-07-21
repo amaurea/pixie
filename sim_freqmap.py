@@ -37,7 +37,11 @@ if args.apply_beam:
 	# Smooth manually using full-sky geometry
 	for field in fields:
 		print field.name
-		minfo = sharp.map_info_fejer1(field.map.shape[-2], field.map.shape[-1])
+		# Make sure we have the standard pixel ordering before transforming
+		if field.map.wcs.wcs.cdelt[0] > 0: field.map = field.map[...,:,::-1]
+		if field.map.wcs.wcs.cdelt[1] < 0: field.map = field.map[...,::-1,:]
+		field.map = enmap.samewcs(np.ascontiguousarray(field.map), field.map)
+		minfo = sharp.map_info_clenshaw_curtis(field.map.shape[-2], field.map.shape[-1])
 		ainfo = sharp.alm_info(lmax=beam_lmax)
 		sht   = sharp.sht(minfo, ainfo)
 		alm   = np.zeros((3,ainfo.nelem),dtype=complex)
