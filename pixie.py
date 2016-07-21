@@ -290,12 +290,15 @@ def write_tod(fname, tod):
 				hfile[key] = data
 			except AttributeError: pass
 
-def read_tod(fname):
+def read_tod(fname, nsamp=None):
 	data = {}
 	with h5py.File(fname, "r") as hfile:
 		for key in ["signal","elements","point","pix"]:
 			if key in hfile:
 				data[key] = hfile[key].value
+				# Only read nsamp samples if requested.
+				if nsamp is not None:
+					data[key] = data[key][...,:nsamp]
 	return PixieTOD(**data)
 
 ##### Signal #####

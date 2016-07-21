@@ -24,6 +24,7 @@ nspin  = int(round(config.spin_period  / config.delay_period))
 ntheta = int(round(config.scan_period  / config.spin_period))
 nphi   = int(round(config.orbit_period / config.scan_period))
 nfreq  = ndelay / ncopy
+nsamp  = ntheta * nspin * ndelay
 
 # Our largest delay is config.delay_amp. The lowest frequency
 # is c/delay_amp/2 because the lowest frequency is the one
@@ -48,7 +49,7 @@ def dump(pre, d):
 for fname in args.tods[comm.rank::comm.size]:
 	print fname
 	# Read the tod. tod.signal has units W/sr/m^2.
-	tod = pixie.read_tod(fname)
+	tod = pixie.read_tod(fname, nsamp=nsamp)
 	pre = args.odir + "/" + os.path.basename(fname)[:-4]
 	# Center our coordinate system on our column. We didn't save
 	# the pointing, so we have to compute it from the elements
