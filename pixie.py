@@ -374,12 +374,18 @@ class PointingGenerator:
 		self.orbit_period = kwargs["orbit_period"]
 		self.orbit_phase  = kwargs["orbit_phase"]*utils.degree
 		self.orbit_step   = kwargs["orbit_step"]
+		self.orbit_step_dur=kwargs["orbit_step_dur"]
 		self.eclip_angle  = kwargs["eclip_angle"]*utils.degree
 		self.ref_ctime    = kwargs["ref_ctime"]
 	def calc_elements(self, ctime):
 		"""Generate orbital elements for each ctime."""
-		t = ctime - self.ref_ctime
-		ang_orbit = self.orbit_phase   + 2*np.pi*np.floor(t/self.orbit_step)*self.orbit_step/self.orbit_period
+		t     = ctime - self.ref_ctime
+		# Get our orbit number, taking into account the transition time
+		orbit = np.floor((t+0.5*self.orbit_step_dur)/(self.orbit_step + self.orbit_step_dur))
+		# Compensate for the transition time, so that the non-transition stuff
+		# effectively gives a smooth orbit.
+		t    -= orbit * self.orbit_step_dur
+		ang_orbit = self.orbit_phase   + 2*np.pi*orbit*self.orbit_step/self.orbit_period
 		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
 		ang_spin  = self.spin_phase    + 2*np.pi*t/self.spin_period
 		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
@@ -420,7 +426,7 @@ class PointingGenerator:
 		# Get the polarization orientation on the sky
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
 		# Apply our extra polarization rotation. See polrot_field.
-		gamma -= angpos[0]
+		gamma -= angpos[0]*np.sin(angpos[1])
 		return bunch.Bunch(angpos=angpos, gamma=gamma, delay=delay, pos=zvec)
 
 def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
@@ -511,7 +517,7 @@ def polrot_field(field):
 	code must add phi to its psi too."""
 	theta, phi = field.map.posmap()
 	map = field.map.copy()
-	map[1:3] = enmap.rotate_pol(map[1:3], phi)
+	map[1:3] = enmap.rotate_pol(map[1:3], phi*np.sin(theta))
 	return Field(field.name, map, field.spec, field.beam)
 
 def calc_subfield(field, shape, wcs, target_beam, subsample=1, pad=0, apod=0):
