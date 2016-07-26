@@ -42,6 +42,161 @@ class PixieSim:
 
 class OpticsSim:
 	def __init__(self, config):
+		"""Initialize a Pixie Optics simulator from the given configuration object.
+		This version of OpticsSim does not support frequency-dependent beams. This
+		should lead to a large simplification and speedup."""
+		# Pointing
+		self.pointgen      = PointingGenerator(**config.__dict__)
+		self.sample_period = config.sample_period
+
+		# Frequencies
+		self.nfreq         = int(config.nfreq)
+		self.fmax          = int(config.fmax)
+		self.lmax          = int(config.lmax)
+		self.nl            = int(config.nl)
+
+		# Subsampling. Force to odd number
+		self.subsample_num = int(config.subsample_num)/2*2+1
+		self.subsample_method = config.subsample_method
+
+		# Beam types
+		self.beam_types = [parse_beam(beam_type) for beam_type in config.beam_types]
+
+		# Barrels
+		self.barrels = [parse_barrel(barrel) for barrel in config.barrels]
+
+		# Detectors
+		self.dets = [parse_det(det) for det in config.dets]
+
+		# Skies. Each sky is a list of fields, such as cmb or dust
+		self.skies = [[polrot_field(read_field(field)) for field in sky] for sky in config.skies]
+
+		# Computed
+		self.ncomp       = 3
+		self.nhorn       = 2
+		self.ndet        = len(self.dets)
+		self.nsamp_orbit = int(np.round(self.pointgen.scan_period/self.sample_period))
+		self.wcs_freq    = freq_geometry(self.fmax, self.nfreq)
+		self.freqs       = self.wcs_freq.wcs_pix2world(np.arange(self.nfreq),0)[0]
+		self.refbeam     = calc_reference_beam(self.beam_types, self.fmax, self.nfreq, self.lmax, self.nl)
+	@property
+	def ref_ctime(self): return self.pointgen.ref_ctime
+	def gen_tod_orbit(self, i):
+		"""Generate the full TOD for orbit #i, defined as the samples
+		i*nsamp_orbit:(i+1)*nsamp_orbit. If the reference time is not
+		at the start of an orbit, the cut from one orbit to the next
+		will happen in the middle of these tods. We assume that there
+		is an integer number of samples in an orbit."""
+		samples = np.arange(i*self.nsamp_orbit,(i+1)*self.nsamp_orbit)
+		return self.gen_tod_samples(samples)
+	def gen_tod_samples(self, samples):
+		"""Generate time ordered data for the given sample indices.
+		The sample index starts at 0 at the reference time, and
+		increases by 1 for each sample_period seconds. This function
+		applies subchunking (to save memory) and subsampling (to simulate
+		continous integration inside each sample) automatically."""
+		tods   = []
+		nsamp  = len(samples)
+		ctimes = self.ref_ctime + np.asarray(samples)*float(self.sample_period)
+		for i in range(0, nsamp, self.chunk_size):
+			L.debug("chunk %3d/%d" % (i/self.chunk_size, (nsamp+self.chunk_size-1)/self.chunk_size))
+			# +1 for the extra overlap-sample, which we will use to remove
+			# any discontinuities caused by interpolation issues.
+			mytimes = ctimes[i:i+self.chunk_size+1]
+			subtimes, weights = subsample(mytimes, self.subsample_num, self.subsample_method)
+			subtod  = self.gen_tod_raw(subtimes)
+			with bench.mark("downsample"):
+				mytod   = downsample_tod_blockwise(subtod, weights)
+			del subtod, subtimes, weights, mytimes
+			tods.append(mytod)
+		return concatenate_tod(tods)
+	def gen_tod_raw(self, ctimes):
+		"""Generate the time-ordered data for the sample times given in ctimes.
+		No oversampling is done, nor is chunking. This is a helper function that
+		should usually not be called directly. The result has units W/sr/m^2."""
+		elements    = self.pointgen.calc_elements(ctimes)
+		orientation = self.pointgen.calc_orientation(elements)
+		# Add up the signal contributions to each horn
+		horn_sig  = np.zeros([self.nhorn,self.ncomp,len(ctimes)])
+		for ibarrel, barrel in enumerate(self.barrels):
+			sky = skies[barrel.sky]
+			for isub, subbeam in enumerate(barrel.subbeams):
+				with bench.mark("calc_pointing"):
+					point = self.pointgen.calc_pointing(orientation, elements.delay, subbeam.offset)
+				with bench.mark("calc_pixels"):
+					pix   = calc_pixels(point.angpos, point.delay, sky.wcs, patch.wcs_delay)
+					del point.angpos, point.delay
+				with bench.mark("calc_response"):
+					resp  = calc_response(point.gamma, subbeam.response, ibarrel) # [nhorn,{dc,delay},...]
+					del point
+				with bench.mark("calc_horn_signal"):
+					for ihorn in range(self.nhorn):
+						horn_sig[ihorn] += calc_horn_signal(patch.map, pix, resp[ihorn])
+					del pix, resp
+		del patches, orientation
+		# Read off each detector's response
+		det_sig = np.zeros([self.ndet,len(ctimes)])
+		with bench.mark("calc_det_signal"):
+			for idet, det in enumerate(self.dets):
+				det_sig[idet] = calc_det_signal(horn_sig[det.horn], det.response)
+		del horn_sig
+		# output result as a PixieTOD
+		return PixieTOD(
+				signal   = det_sig,
+				elements = [elements.ctime, elements.orbit, elements.scan, elements.spin, elements.delay])
+	def get_patch_bounds(self, orientation):
+		"""Return the (shape,wcs) geometry needed for simulating the sky at the
+		given orientation, including any beam offsets and a margin to allow for
+		beam smoothing."""
+		# Get the padding needed based on the beam size and maximum beam offset
+		rmax  = [subbeam.offset[1] for barrel in self.barrels for subbeam in barrel.subbeams]
+		# Max beam size of any output beam
+		bsize = max([beam_type.fwhm for beam_type in self.beam_types])*utils.fwhm
+		# Reduce by amount already smoothed. Since fwhms are just approximate,
+		# cap to 1/4 of the original beam for the purposes of finding the padding area
+		bsize = (np.maximum((bsize/4)**2, bsize**2-self.refbeam.fwhm**2))**0.5
+		pad   = rmax + bsize*self.beam_nsigma + self.patch_apod
+		# Get a (hopefully) representative subset of the pointing as angular coordinates
+		zvec  = orientation.T[:,2,::self.bounds_skip]
+		angpos= utils.rect2ang(zvec, axis=0, zenith=False)
+		# Get the bounds needed for a longitudinal strip to contain these angles
+		box   = longitude_band_bounds(angpos, niter=self.bounds_niter)
+		# 2*pad because the argument to widen_box is the total increase in width, not
+		# the radius.
+		box   = utils.widen_box(box, 2*pad, relative=False)
+		# Actually generate the geometry
+		return  longitude_geometry(box, res=self.patch_res, dims=(self.ncomp,), ref=(0,0))
+	def calc_patch_signal(self, orientation):
+		"""Computes the per-patch interferograms in units W/sr/m^2."""
+		# Prepare the input spectrogram patches
+		patches = [[None for btype in self.beam_types] for sky in self.skies]
+		with bench.mark("get_patch_bounds"):
+			shape, wcs = self.get_patch_bounds(orientation)
+		for isky, sky in enumerate(self.skies):
+			# Skip skies that aren't in use
+			if not any([barrel.sky == isky for barrel in self.barrels]): continue
+			for ifield, field in enumerate(sky):
+				with bench.mark("field.project"):
+					subfield = calc_subfield(field, shape, wcs, self.refbeam,
+							subsample=self.patch_nsub, pad=self.patch_pad, apod=self.patch_apod)
+				for ibtype, btype in enumerate(self.beam_types):
+					with bench.mark("calc_specmap"):
+						# W/sr/m^2/Hz
+						specmap = calc_specmap(subfield, self.freqs, btype, apod=self.patch_apod)
+					with bench.mark("calc_spectrogram"):
+						# W/sr/m^2
+						pmap, wcs_delay = calc_spectrogram(specmap, self.wcs_freq)
+						del specmap
+					# This should be elsewhere
+					with bench.mark("prefilter"):
+						pmap = enmap.samewcs(np.ascontiguousarray(np.rollaxis(pmap,1)),pmap)
+						pmap = utils.interpol_prefilter(pmap, npre=1, order=3)
+					add_patch(patches, isky, ibtype, Patch(pmap, wcs_delay))
+				del subfield, pmap
+		return patches
+
+class OpticsSimOld:
+	def __init__(self, config):
 		"""Initialize a Pixie Optics simulator from the given configuration object."""
 		# Pointing
 		self.pointgen      = PointingGenerator(**config.__dict__)
@@ -541,10 +696,34 @@ def calc_subfield(field, shape, wcs, target_beam, subsample=1, pad=0, apod=0):
 	res = wfield.project(shape, wcs)
 	return res
 
+# It is often convenient to have spec and beam as plain
+# arrays rather than functions. This makes transforming
+# them easy. For example deriving the spectrogram from
+# the spectrum or dividing by the beam. However, the
+# spectrum isn't just proportional to the temperature.
+# To be fast and memory-efficient, we want to be able to
+# directly evaluate tcorr(pos, delay) without
+# needing to do interpol(spec2tcorr(spec(pos, freqs)), delay).
+# If spec was prop to T, then one could perform spec2tcorr once
+# and then just scale the result. But it isn't.
+#
+# We may be able to find analytic expressions for the graybody
+# autocorrelation function, though. Let's see:
+#
+# gray(T,b,f) = A*f**(3+b)/(exp(qf/T)-1)
+# where A = (2h/c^2) and q = h/kb
+# 
+# gray(T,b,f) = gray(aT,b,af)/a**(3+b)
+#
+# so for any given b, we can precompute just a single
+# interpolating function, and then just look up with scaling.
+# And for graybody we just have a constant b, so this will work.
+
+
 class Field:
 	def __init__(self, name, map, spec, beam, order=3):
 		"""A field comprising one component of the sky. Specified
-		by an enmap "map", a spectrum function spec, and a beam
+		by an enmap "map", a spectrum response spec[, and a beam
 		function beam"""
 		self.name = name
 		self.spec = spec
@@ -552,13 +731,7 @@ class Field:
 		self.order= order
 		self.map  = map
 		self.pmap = utils.interpol_prefilter(map, order=order)
-	def project(self, shape, wcs):
-		"""Project our values onto a patch with the given shape and wcs. Returns
-		a new Field."""
-		pos = enmap.posmap(shape, wcs)
-		map = enmap.ndmap(self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False, safe=False, mode="wrap"),wcs)
-		return Field(self.name, map, self.spec, self.beam, self.order)
-	def to_beam(self, beam, apod=0):
+	def to_beam(self, beam):
 		"""Update our field to a new beam."""
 		map = update_beam(self.map[None], [0], beam, self.beam, apod=apod)[0]
 		return Field(self.name, map, self.spec, beam, order=self.order)
@@ -574,14 +747,23 @@ class SpecBlackbody:
 	type = "blackbody"
 	def __init__(self, name):
 		self.name = name
-	def __call__(self, freq, map):
-		res = enmap.samewcs(np.zeros(freq.shape + map.shape, map.dtype), map)
-		res[:,0]  = blackbody(freq, map[0])
-		# Constant polarization fraction by frequency
-		nonzero   = map[0] != 0
-		polfrac   = map[1:]
-		polfrac[:,nonzero] /= map[0,nonzero]
-		res[:,1:] = res[:,0,None] * polfrac[None]
+		self.tcorr_gen = blackbody_tcorr()
+	def spec(self, freq, amps):
+		"""Evaluate the frequency spectrum at the given frequency for
+		the given blackbody amplitudes[{T,Q,U}]. freq and amps must
+		be broadcastable."""
+		# Make output array with broadcasting
+		res = np.asanyarray(freq)+np.asanyarray(amps)
+		res[0]  = blackbody(freq, amps[0])
+		res[1:] = res[0] * amps[1:]/amps[0]
+		res[~np.isfinite(res)] = 0
+		return res
+	def tcorr(self, delay, amps):
+		"""Like spec, but returns the time correlation function instead."""
+		res = np.asanyarray(delay)+np.asanyarray(amps)
+		res[0] = self.tcorr_gen(delay, amps[0])
+		res[1:] = res[0] * amps[1:]/amps[0]
+		res[~np.isfinite(res)] = 0
 		return res
 
 class SpecGraybody:
@@ -592,11 +774,20 @@ class SpecGraybody:
 		self.beta = beta
 		self.fref = fref
 		self.unit = unit
-	def __call__(self, freq, map):
-		res   = enmap.samewcs(np.zeros(freq.shape + map.shape, map.dtype), map)
+		self.tcorr_gen = graybody_tcorr(beta)
+	def spec(self, freq, amps):
+		"""Evaluate the frequency spectrum at the given frequency for
+		the given graybody amplitudes. The frequencies and amplitudes
+		must be braodcastable. For example freq[nfreq,1,1], amps[{T,Q,U},1,ny,nx]
+		will result in res[{T,Q,U},nfreq,ny,nx]."""
 		scale = graybody(freq, self.T, self.beta) / graybody(self.fref, self.T, self.beta) * self.unit
-		res  += scale[:,None,None,None] * map[None,:,:,:]
-		return res
+		return amps * scale
+	def tcorr(self, delay, amps):
+		"""Evaluate the time-correlation function (spectrogram) at the given
+		time delays for the given graybody amplitudes. The delays and
+		amplitudes must be broadcastable."""
+		scale = self.tcorr_gen(delay, self.T) / graybody(self.fref, self.T, self.beta) * self.unit
+		return amps * scale
 
 ##### Beam types #####
 
@@ -832,29 +1023,151 @@ def broadcast_stack(a, b):
 	b = b[(None,)*adim]
 	return a, b
 
-def blackbody(freqs, T, deriv=False):
+def blackbody(freqs, T, T_derivs=None):
 	"""Given a set of frequencies freqs[{fdims}] and a set of
 	temperatures T[{tdims}], returns a blackbody spectrum
 	spec[{fdims},{tdims}]. All quantities are in SI units."""
-	return graybody(freqs, T, 0, deriv=deriv)
+	return graybody(freqs, T, 0, T_derivs=T_derivs)
 
-def graybody(freqs, T, beta, deriv=False):
+def graybody(freqs, T, beta, T_derivs=None):
 	"""Given a set of frequencies freqs[{fdims}] and a set of
 	temperatures T[{tdims}] and emmisivities beta[{tdims}], returns a graybody spectrum
-	spec[{fdims},{tdims}]. All quantities are in SI units."""
+	spec[{fdims},{tdims}]. All quantities are in SI units.
+	If T_derivs is not None, it should be a nonzero integer
+	indicating the highest derivative with respect to T to include.
+	For example, if T_derivs==2, the result will be (0th,1st,2nd)
+	derivative. In this case, the result will have dimension
+	[T_derivs+1,{fdims},{tdims}]."""
 	freqs, T = broadcast_stack(freqs, T)
-	beta = np.asanyarray(beta)
-	with warnings.catch_warnings():
-		warnings.filterwarnings("ignore")
-		ex = np.exp(h*freqs/(kb*T))
-		res = (2*h/c**2) * freqs**(3+beta) / (ex - 1)
-		if deriv:
-			res *= ex/(ex-1)*(h/kb)*freqs/T**2
-		if res.ndim == 0:
-			if ~np.isfinite(res): res = 0
-		else:
-			res[~np.isfinite(res)] = 0
+	beta     = np.asanyarray(beta)
+	norder   = 1
+	if T_derivs is not None: norder = T_derivs + 1
+	res = np.zeros((norder,)+np.broadcast(freqs,T).shape)
+	# Common factor for all orders
+	pre= (2*h/c**2) * freqs**(3+beta)
+	with utils.nowarn():
+		# Building blocks of derivatives
+		a  = h*freqs/kb
+		g0 = np.exp(a/T)
+		f0 = 1/(g0-1)
+		# 0th order
+		if norder > 0:
+			res[0] = f0
+		if norder > 1:
+			g1 = -g0*a/T**2
+			f1 = -f0**2*g1
+			res[1] = f1
+		if norder > 2:
+			g2 = a/T**3*(2*g0-T*g1)
+			f2 = -2*f0*f1*g1-f0**2*g2
+			res[2] = f2
+		if norder > 3:
+			g3 = -(3./T+a/T**2)*g2 + a/T**3*g1
+			f3 = -2*f1**2*g1-2*f0*f2*g1-4*f0*f1*g2-f0**2*g3
+			res[3] = f3
+		if norder > 4:
+			raise NotImplementedError
+		res *= pre
+	res  = utils.tofinite(res)
+	# Don't include derivative dimension if derivatives were disabled.
+	if T_derivs is None:
+		res = res[0]
+	return res
+
+class InterpolatedTaylorLookup:
+	def __init__(self, coeffs, pstep, interpol=3, x0=0):
+		"""Construct an object that can be used to approximate some function
+		by using the coefficients of its taylor expansion, where these coefficients
+		are a function of position and are regularly sampled with interval pstep.
+		coeffs is an array [order+1,npos], where the corresponding positions are
+		[0,1*pstep,2*pstep,...]. The optional argument interpol specifies the
+		order of the interpolation to be used when looking up the taylor expansion
+		coefficients given a position. This is not the same thing as the order
+		to be used in the taylor expansion, which is given by the number of
+		coefficients passed in."""
+		self.coeffs = coeffs
+		self.coeffs_pre = [utils.interpol_prefilter(coeff, npre=0, order=interpol) for coeff in coeffs]
+		self.pstep    = pstep
+		self.interpol = interpol
+		self.x0       = x0
+	def __call__(self, pos, x, order=None):
+		"""Evaluate the function at positions pos[:] for the function
+		value x using all taylor coefficients, or only up to that order
+		specified by the optional order argument."""
+		if order is None: order = len(self.coeffs_pre)-1
+		pix = np.asarray(pos)/self.pstep
+		dx  = x-self.x0
+		res, fac = None, 1.0
+		for i in range(order+1):
+			c = utils.interpol(self.coeffs_pre[i], pix[None], order=self.interpol, prefilter=False)
+			if res is None: res = c
+			else: res += fac*dx**i*c
+			print i, fac, dx
+			fac /= (i+1)
 		return res
+
+class SpecInterpol:
+	"""This class allows fast lookups of spectrum and spectrogram (time
+	correlation function) values."""
+	def __init__(self, specfun, Tref, filter=None, nsamp=50000, order=3, taylor=3, fmax=None, **kwargs):
+		"""specfun(freqs, T, T_derivs=num, **kwargs):
+		  A function implementing the spectrum to be interpolated.
+		  Returns spectrum[num,nfreq]
+		Tref: The temperature to Taylor-expand the spectrum around. The spectrum
+		  is assumed to be a nonlinear function of the temperature.
+		filter(freqs): An optional frequency response function, which the spectrum
+		  is multiplied by.
+		nsamp [int]: The number of samples to use in the interpolation
+		order [int]: The spline order to use in the interpolation
+		taylor [int]: The order of the Taylor expansion
+		fmax [float]: The highest frequency to use in the interpolation. Should
+		  be high enough to encompass the whole spectrum.
+		Any additional arguments are passed on to specfun."""
+		if fmax is None: fmax = kb*Tref/h*100
+		fwcs  = freq_geometry(fmax, nsamp)
+		freqs = fwcs.wcs_pix2world(np.arange(nsamp),0)[0]
+		spec_series = specfun(freqs, Tref, T_derivs=taylor, **kwargs)
+		# Apply filter if necessary
+		if filter is not None:
+			filter_vals = filter(freqs)
+			for spec in spec_series:
+				spec *= filter_vals
+		# Transform each order of the Taylor series
+		tcorr_series = []
+		for spec in spec_series:
+			tcorr, twcs = spec2delay(spec, fwcs)
+			tcorr_series.append(tcorr)
+		# Build our Taylor lookups
+		self.tcorr_lookup = InterpolatedTaylorLookup(tcorr_series, twcs.wcs.cdelt[0], interpol=order, x0=Tref)
+		self.spec_lookup  = InterpolatedTaylorLookup(spec_series,  fwcs.wcs.cdelt[0], interpol=order, x0=Tref)
+		self.filter = filter
+	def eval_spec (self, freq,  T, order=None):
+		return self.spec_lookup (freq, T, order=order)
+	def eval_tcorr(self, delay, T, order=None):
+		return self.tcorr_lookup(delay, T, order=order)
+
+# These are superceded by SpecInterpol. They use a different philosophy
+# that lets them cover all temperatures, not just those close to a reference
+# point, at the cost of not being able to support a filter.
+def blackbody_tcorr(xmax=100, nsamp=50000, order=3):
+	return graybody_tcorr(beta=0, xmax=xmax, nsamp=nsamp, order=3)
+class graybody_tcorr:
+	"""This class allows direct evaluation of the time_correlation function
+	corresponding to a graybody with a fixed beta parameter."""
+	def __init__(self, beta=0, xmax=100, nsamp=50000, order=3):
+		self.beta, self.order, self.Tref = beta, order, h/kb
+		# Build spec at reference temperature
+		fwcs  = freq_geometry(xmax, nsamp)
+		freqs = fwcs.wcs_pix2world(np.arange(nsamp),0)[0]
+		spec  = graybody(freqs, self.Tref, self.beta)
+		# Get corresponding tcorr
+		tcorr, twcs = spec2delay(spec, fwcs)
+		# Prefilter and extract scale
+		self.pcorr = utils.interpol_prefilter(tcorr, npre=0, order=self.order)
+		self.tstep = twcs.wcs.cdelt[0]
+	def __call__(self, delay, T):
+		a = T/self.Tref
+		return utils.interpol(self.pcorr, np.asarray(delay)[None]*a/self.tstep, order=self.order, prefilter=False)*a**(1+3+self.beta)
 
 def spec2delay(arr, wcs, axis=0, inplace=False, bsize=32):
 	"""Converts a spectrum cube arr[nfreq,...] into an
@@ -953,7 +1266,7 @@ def fullsky_geometry(res=0.1*utils.degree, dims=()):
 
 def freq_geometry(fmax, nfreq):
 	wcs = enlib.wcs.WCS(naxis=1)
-	wcs.wcs.cdelt[0] = fmax/nfreq
+	wcs.wcs.cdelt[0] = float(fmax)/nfreq
 	wcs.wcs.crpix[0] = 1
 	wcs.wcs.ctype[0] = 'FREQ'
 	return wcs
