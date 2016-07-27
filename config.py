@@ -35,22 +35,9 @@ tod_filters = [
 	]
 
 # These affect memory use and accuracy
-subsample_num = 7
+subsample_num    = 7
 subsample_method = "gauss"
-
-# These affect sub-patches used in the spectrogram
-# calculation.
-chunk_size    = 3e5
-bounds_skip   = 13
-bounds_niter  = 5
-# Sensitive to beam_nsigma even when not doing any smoothing
-# or apodization at that stage. Going from 3 to 4 took my
-# residuals from 1.0e-6 to 3.6e-6.
-beam_nsigma   = 6
-patch_res     = 0.2
-patch_nsub    = 5
-patch_pad     = 10
-patch_apod    = 0.6
+chunk_size       = 3e5
 
 # The detectors
 dets = [
@@ -63,14 +50,16 @@ dets = [
 # The barrels
 I = [[1,0,0],[0,1,0],[0,0,1]]
 barrels = [
-	{"sky": 0, "subbeams": [ {"type": 0, "offset": [0,0,0], "response": I} ] },
-	{"sky": 1, "subbeams": [ {"type": 0, "offset": [0,0,0], "response": I} ] },
+	[{"sky": 0, "filter": 0, "beam": 0, "offset": [0,0,0], "response": I}],
+	[{"sky": 1, "filter": 0, "beam": 0, "offset": [0,0,0], "response": I}],
 ]
 
 # The beams
-beam_types = [
-	# Standard frequency-independent Gaussian
-	{"type": "gauss_scatter", "fwhm": 1.9, "freq_cut": 1.5e12}
+beams = [
+	{"type": "gauss", "fwhm": 1.9}
+]
+filters = [
+	{"type": "gauss", "sigma": 1.5e12}
 ]
 
 # The skies
