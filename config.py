@@ -59,7 +59,7 @@ beams = [
 	{"type": "gauss", "fwhm": 1.9}
 ]
 filters = [
-	{"type": "gauss", "sigma": 1.5e12}
+	{"type": "gauss", "sigma": 1.5e12/2**0.5}
 ]
 
 # The skies

@@ -41,7 +41,7 @@ class PixieSim:
 		return tod
 
 class OpticsSim:
-	def __init__(self, config):
+	def __init__(self, config, comm=None):
 		"""Initialize a Pixie Optics simulator from the given configuration object.
 		This version of OpticsSim does not support frequency-dependent beams. This
 		should lead to a large simplification and speedup."""
@@ -75,15 +75,28 @@ class OpticsSim:
 		# Skies. Each sky is a list of fields, such as cmb or dust
 		self.skies = [[read_field(field) for field in sky] for sky in config.skies]
 
+		#i = 0
+		#for sky in self.skies:
+		#	for sub in sky:
+		#		enmap.write_map("foo%02d.fits" % i, sub.map)
+		#		i += 1
+
 		# Precompute effective sky for each sky-beam-filter combination.
 		with bench.show("setup_subskies"):
 			self.subskies = self.setup_subskies(self.skies, self.barrels, self.beams, self.filters)
-
+		#
+		#i = 0
+		#for key, sky in self.subskies.items():
+		#	for sub in sky:
+		#		enmap.write_map("moo%02d.fits" % i, sub.map)
+		#		i += 1
+		#1/0
 		# Computed
 		self.ncomp       = 3
 		self.nhorn       = 2
 		self.ndet        = len(self.dets)
 		self.nsamp_orbit = int(np.round(self.pointgen.scan_period/self.sample_period))
+		self.comm        = comm
 	@property
 	def ref_ctime(self): return self.pointgen.ref_ctime
 	def gen_tod_orbit(self, i):
@@ -632,22 +645,37 @@ def apply_beam_fullsky(map, new_beam, old_beam=None, lmax=None, ltest=10000, vte
 		beam = new_beam(l)/old_beam(l)
 		mask = np.where(beam<vtest)[0]
 		lmax = mask[0] if len(mask) > 0 else ltest
+		# Too high lmax results in aliasing problems
+		# Because the alms are no longer orthogonal
+		lmax = min(lmax, map.shape[-2], map.shape[-1])
 		beam = beam[:lmax+1]
 	else:
 		l    = np.arange(lmax+1.)
 		beam = new_beam(l)/old_beam(l)
 	# Prepare the SHT
+	#print "beam"
+	#print beam
+	#print "lmax"
+	#print lmax
+	#print "map.shape"
+	#print map.shape
 	minfo = sharp.map_info_clenshaw_curtis(map.shape[-2], map.shape[-1])
 	ainfo = sharp.alm_info(lmax=lmax)
 	sht   = sharp.sht(minfo, ainfo)
 	alm   = np.zeros((3,ainfo.nelem),dtype=complex)
 	# Forwards transform
+	#print "A"
+	#print map[0,::4,::4]
 	sht.map2alm(map[:1].reshape(1,-1), alm[:1])
 	sht.map2alm(map[1:].reshape(2,-1), alm[1:], spin=2)
-	alm   = ainfo.lmul(alm, beam)
+	#print "alm"
+	#print np.abs(alm[0])
+	#alm   = ainfo.lmul(alm, beam)
 	# And transform back again
 	sht.alm2map(alm[:1], map[:1].reshape(1,-1))
 	sht.alm2map(alm[1:], map[1:].reshape(2,-1), spin=2)
+	#print "B"
+	#print map[0,::4,::4]
 	return map
 
 def read_field(fname):
@@ -1101,9 +1129,9 @@ class SpecInterpol:
 		self.spec_lookup  = InterpolatedTaylorLookup(spec_series,  fwcs.wcs.cdelt[0], interpol=order, x0=Tref)
 		self.filter = filter
 	def eval_spec (self, freq,  T, order=None):
-		return self.spec_lookup (freq, T, order=order)
+		return self.spec_lookup (np.abs(freq), T, order=order)
 	def eval_tcorr(self, delay, T, order=None):
-		return self.tcorr_lookup(delay, T, order=order)
+		return self.tcorr_lookup(np.abs(delay), T, order=order)
 
 # These are superceded by SpecInterpol. They use a different philosophy
 # that lets them cover all temperatures, not just those close to a reference
