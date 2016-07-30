@@ -11,10 +11,10 @@ scan_phase    = 90
 # And the solar orbit
 #orbit_period  = 365.25636*24*3600
 # Reduced orbital period to make sims less oversampled
-orbit_period  = scan_period*scan_period/spin_period
-orbit_phase   = 90
 orbit_step    = scan_period
 orbit_step_dur= 1
+orbit_period  = scan_period*scan_period/spin_period
+orbit_phase   = 90
 eclip_angle   = 0
 # The optical delay due to the mirror stroke
 delay_shape   = "triangle"

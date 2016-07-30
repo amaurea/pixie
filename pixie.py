@@ -84,7 +84,7 @@ class OpticsSim:
 		# Precompute effective sky for each sky-beam-filter combination.
 		with bench.show("setup_subskies"):
 			self.subskies = self.setup_subskies(self.skies, self.barrels, self.beams, self.filters)
-		#
+		
 		#i = 0
 		#for key, sky in self.subskies.items():
 		#	for sub in sky:
@@ -96,6 +96,7 @@ class OpticsSim:
 		self.nhorn       = 2
 		self.ndet        = len(self.dets)
 		self.nsamp_orbit = int(np.round(self.pointgen.scan_period/self.sample_period))
+		self.nsamp_step  = int(np.round(self.pointgen.orbit_step_dur/self.sample_period))
 		self.comm        = comm
 	@property
 	def ref_ctime(self): return self.pointgen.ref_ctime
@@ -105,7 +106,7 @@ class OpticsSim:
 		at the start of an orbit, the cut from one orbit to the next
 		will happen in the middle of these tods. We assume that there
 		is an integer number of samples in an orbit."""
-		samples = np.arange(i*self.nsamp_orbit,(i+1)*self.nsamp_orbit)
+		samples = np.arange(i*self.nsamp_orbit,(i+1)*self.nsamp_orbit) + i*self.nsamp_step
 		return self.gen_tod_samples(samples)
 	def gen_tod_samples(self, samples):
 		"""Generate time ordered data for the given sample indices.
@@ -565,13 +566,24 @@ class PointingGenerator:
 	def calc_elements(self, ctime):
 		"""Generate orbital elements for each ctime."""
 		t     = ctime - self.ref_ctime
-		## Get our orbit number, taking into account the transition time
-		#orbit = np.floor((t+0.5*self.orbit_step_dur)/(self.orbit_step + self.orbit_step_dur))
-		## Compensate for the transition time, so that the non-transition stuff
-		## effectively gives a smooth orbit.
-		#t    -= orbit * self.orbit_step_dur
-		#ang_orbit = self.orbit_phase   + 2*np.pi*orbit*self.orbit_step/self.orbit_period
-		ang_orbit = self.orbit_phase   + 2*np.pi*np.floor(t/self.orbit_step)*self.orbit_step/self.orbit_period
+		# Get our orbit number, taking into account the transition time
+		# ----|trans|----------orbit-----------|trans|-----
+		# For now we will implement a transition which simply
+		# continues the motion of the closest orbit:
+		# ----...|...--------------------------...|...-----
+		# So if we are half a step duration ahead of orbit #n, we pretend
+		# we're still in orbit #n
+		scan = np.floor((t+0.5*self.orbit_step_dur)/(self.orbit_step + self.orbit_step_dur))
+		# The non-transition stuff should happen as if the transition period didn't
+		# actually exist. For example, our scan angle would go:
+		# |-trans|---scan---|trans-|-scan
+		#  012789 0123456789 012789 0123456789
+		# Removing the transitions here results in continuous orbits,
+		# and discontinuities are confined to the middle of the transition
+		# period.
+		t -= scan * self.orbit_step_dur
+		ang_orbit = self.orbit_phase   + 2*np.pi*scan*self.orbit_step/self.orbit_period
+		#ang_orbit = self.orbit_phase   + 2*np.pi*np.floor(t/self.orbit_step)*self.orbit_step/self.orbit_period
 		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
 		ang_spin  = self.spin_phase    + 2*np.pi*t/self.spin_period
 		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
@@ -630,6 +642,7 @@ def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
 
 ##### Spectrogram generation #####
 
+#j=0
 def apply_beam_fullsky(map, new_beam, old_beam=None, lmax=None, ltest=10000, vtest=1e-10):
 	"""Apply the beam new_beam to map using spherical
 	harmonics."""
@@ -652,6 +665,10 @@ def apply_beam_fullsky(map, new_beam, old_beam=None, lmax=None, ltest=10000, vte
 	else:
 		l    = np.arange(lmax+1.)
 		beam = new_beam(l)/old_beam(l)
+	#global j
+	#np.savetxt("beam%02d.txt" % j, beam, fmt="%15.7e")
+	#j += 1
+
 	# Prepare the SHT
 	#print "beam"
 	#print beam
@@ -670,7 +687,7 @@ def apply_beam_fullsky(map, new_beam, old_beam=None, lmax=None, ltest=10000, vte
 	sht.map2alm(map[1:].reshape(2,-1), alm[1:], spin=2)
 	#print "alm"
 	#print np.abs(alm[0])
-	#alm   = ainfo.lmul(alm, beam)
+	alm   = ainfo.lmul(alm, beam)
 	# And transform back again
 	sht.alm2map(alm[:1], map[:1].reshape(1,-1))
 	sht.alm2map(alm[1:], map[1:].reshape(2,-1), spin=2)
