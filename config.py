@@ -37,7 +37,7 @@ tod_filters = [
 # These affect memory use and accuracy
 subsample_num    = 7
 subsample_method = "gauss"
-chunk_size       = 3e5
+chunk_size       = 1e5
 
 # The detectors
 dets = [

@@ -623,8 +623,8 @@ class PointingGenerator:
 		angpos[0] = utils.rewind(angpos[0])
 		# Get the polarization orientation on the sky
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
-		# Apply our extra polarization rotation. See polrot_field.
-		gamma -= angpos[0]*np.sin(angpos[1])
+		## Apply our extra polarization rotation. See polrot_field.
+		#gamma -= angpos[0]*np.sin(angpos[1])
 		#gamma -= angpos[0]
 		return bunch.Bunch(angpos=angpos, gamma=gamma, delay=delay, pos=zvec)
 
@@ -1105,7 +1105,7 @@ class InterpolatedTaylorLookup:
 		res, fac = None, 1.0
 		for i in range(order+1):
 			c = utils.interpol(self.coeffs_pre[i], pix[None], order=self.interpol, prefilter=False)
-			if res is None: res = c
+			if res is None: res = c*dx**0
 			else: res += fac*dx**i*c
 			fac /= (i+1)
 		return res

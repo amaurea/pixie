@@ -7,13 +7,14 @@ parser.add_argument("-C", "--config",   type=str, default=None)
 parser.add_argument("-S", "--sky",      type=int, default=0)
 parser.add_argument("-T", "--template", type=str, default=None)
 parser.add_argument("-u", "--unit",     type=str, default=None)
-parser.add_argument("-B", "--apply-beam", type=int, default=0)
+parser.add_argument("-B", "--apply-beam", type=int, default=1)
 args = parser.parse_args()
 
 config = pixie.load_config(args.config)
 freqs  = pixie.parse_floats(args.freqs)
 beam_lmax = 1000
-bsigma  = 1.9*utils.degree*utils.fwhm
+#bsigma  = 1.9*utils.degree*utils.fwhm
+beam    = pixie.BeamGauss(1.9*utils.degree*utils.fwhm)
 fscatter= 1.5e12
 scatter = np.exp(-(freqs/fscatter)**2)
 
@@ -29,43 +30,49 @@ else:
 
 if args.apply_beam:
 	print "Applying beam"
-	# We will apply a hardcoded gaussian for now
-	l       = np.arange(beam_lmax+1)
-	beam    = np.exp(-0.5*l*(l+1)*bsigma**2)
-	bmat    = np.zeros((3,3,len(beam)))
-	for i in range(3): bmat[i,i] = beam
-	# Smooth manually using full-sky geometry
-	for field in fields:
+	for i, field in enumerate(fields):
 		print field.name
-		# Make sure we have the standard pixel ordering before transforming
-		if field.map.wcs.wcs.cdelt[0] > 0: field.map = field.map[...,:,::-1]
-		if field.map.wcs.wcs.cdelt[1] < 0: field.map = field.map[...,::-1,:]
-		field.map = enmap.samewcs(np.ascontiguousarray(field.map), field.map)
-		minfo = sharp.map_info_clenshaw_curtis(field.map.shape[-2], field.map.shape[-1])
-		ainfo = sharp.alm_info(lmax=beam_lmax)
-		sht   = sharp.sht(minfo, ainfo)
-		alm   = np.zeros((3,ainfo.nelem),dtype=complex)
-		print "T -> alm"
-		sht.map2alm(field.map[:1].reshape(1,-1), alm[:1])
-		print "P -> alm"
-		sht.map2alm(field.map[1:].reshape(2,-1), alm[1:], spin=2)
-		print "lmul"
-		alm   = ainfo.lmul(alm, bmat)
-		# And transform back again
-		print "alm -> T"
-		sht.alm2map(alm[:1], field.map[:1].reshape(1,-1))
-		print "alm -> P"
-		sht.alm2map(alm[1:], field.map[1:].reshape(2,-1), spin=2)
-		# Reapply spline filter
-		print "Prefilter"
-		field.pmap = utils.interpol_prefilter(field.map, order=field.order)
+		fields[i] = field.to_beam(beam)
+	if False:
+		# We will apply a hardcoded gaussian for now
+		l       = np.arange(beam_lmax+1)
+		beam    = np.exp(-0.5*l*(l+1)*bsigma**2)
+		bmat    = np.zeros((3,3,len(beam)))
+		for i in range(3): bmat[i,i] = beam
+		# Smooth manually using full-sky geometry
+		for field in fields:
+			print field.name
+			# Make sure we have the standard pixel ordering before transforming
+			if field.map.wcs.wcs.cdelt[0] > 0: field.map = field.map[...,:,::-1]
+			if field.map.wcs.wcs.cdelt[1] < 0: field.map = field.map[...,::-1,:]
+			field.map = enmap.samewcs(np.ascontiguousarray(field.map), field.map)
+			minfo = sharp.map_info_clenshaw_curtis(field.map.shape[-2], field.map.shape[-1])
+			ainfo = sharp.alm_info(lmax=beam_lmax)
+			sht   = sharp.sht(minfo, ainfo)
+			alm   = np.zeros((3,ainfo.nelem),dtype=complex)
+			print "T -> alm"
+			sht.map2alm(field.map[:1].reshape(1,-1), alm[:1])
+			print "P -> alm"
+			sht.map2alm(field.map[1:].reshape(2,-1), alm[1:], spin=2)
+			print "lmul"
+			alm   = ainfo.lmul(alm, bmat)
+			# And transform back again
+			print "alm -> T"
+			sht.alm2map(alm[:1], field.map[:1].reshape(1,-1))
+			print "alm -> P"
+			sht.alm2map(alm[1:], field.map[1:].reshape(2,-1), spin=2)
+			# Reapply spline filter
+			print "Prefilter"
+			field.pmap = utils.interpol_prefilter(field.map, order=field.order)
 	print "Beam done"
 
-maps = [field.project(shape, wcs)(freqs) for field in fields]
+posmap = enmap.posmap(shape, wcs)
+maps = [field.at(freqs[:,None,None], posmap) for field in fields]
+#maps = [field.project(shape, wcs)(freqs) for field in fields]
 if args.apply_beam:
 	maps = [map*scatter[:,None,None,None] for map in maps]
 maps.insert(0, np.sum(maps,0))
-maps = enmap.samewcs(np.array(maps), maps[1])
+maps = enmap.ndmap(np.array(maps), wcs)
 
 # At this point we have a factor 4 higher values than our full
 # tod simulation. There is also a pixel shift issue, but that
