@@ -1,5 +1,5 @@
 import numpy as np, h5py, astropy.io.fits, copy, enlib.wcs, warnings, logging, imp, scipy.signal
-from enlib import enmap, bunch, utils, bench, powspec, fft, sharp, coordinates, curvedsky, lensing, aberration
+from enlib import enmap, bunch, utils, bench, powspec, fft, sharp, coordinates, curvedsky, lensing, aberration, interpol
 L = logging.getLogger(__name__)
 
 # We currently use a normal fits WCS to set up the local patches along
@@ -139,11 +139,13 @@ class OpticsSim:
 			orientation = self.pointgen.calc_orientation(elements)
 		# Add up the signal contributions to each horn
 		horn_sig  = np.zeros([self.nhorn,self.ncomp,len(ctimes)])
+		#point_all = []
 		for ibarrel, barrel in enumerate(self.barrels):
 			for isub, sub in enumerate(barrel):
 				sky = self.subskies[(sub.sky,sub.beam,sub.filter)]
 				with bench.show("calc_pointing"):
 					point = self.pointgen.calc_pointing(orientation, elements.delay, sub.offset)
+					#point_all.append(point.angpos)
 				with bench.show("calc_sky_signal"):
 					sky_sig = calc_sky_signal(sky, point.angpos, point.delay)
 					del point.angpos, point.delay
@@ -165,6 +167,7 @@ class OpticsSim:
 		return PixieTOD(
 				signal   = det_sig,
 				elements = [elements.ctime, elements.orbit, elements.scan, elements.spin, elements.delay])
+				#point = np.array(point_all))
 	def setup_subskies(self, skies, barrels, beams, filters):
 		"""Helper function for setting up the effective sky each
 		sub-beam in each barrel sees."""
@@ -356,23 +359,25 @@ class ReadoutSim:
 	injection, glitches, etc."""
 	def __init__(self, config):
 		self.filters = [parse_tod_filter(f) for f in config.tod_filters]
-	def sim_readout(self, tod):
+	def sim_readout(self, tod, exp=1):
 		"""The main function, which applies all the readout effects, returning
 		the TOD one would actually see."""
 		# Only the frequency filter for now
-		tod = self.apply_filters(tod)
+		dt = (tod.elements[0,-1]-tod.elements[0,0])/(tod.nsamp-1)
+		tod.signal = self.apply_filters(tod.signal, dt, exp=exp)
 		return tod
-	def apply_filters(self, tod):
-		res  = tod.copy()
+	def apply_filters(self, signal, dt, exp=1):
+		res  = signal.copy()
 		# Prepare our fourier space. All filters are assumed to be defined
 		# in fourier space.
-		dt   = (tod.elements[0,-1]-tod.elements[0,0])/(tod.nsamp-1)
-		freqs= fft.rfftfreq(tod.nsamp, dt)
-		fsig = fft.rfft(res.signal)
+		freqs= fft.rfftfreq(res.shape[-1], dt)
+		fsig = fft.rfft(res)
 		# Actually apply the filters
-		for f in self.filters:
-			fsig *= f(freqs)
-		fft.ifft(fsig, res.signal, normalize=True)
+		with utils.nowarn():
+			for f in self.filters:
+				fsig *= f(freqs)**exp
+		if exp < 0: fsig[~np.isfinite(fsig)] = 0
+		fft.ifft(fsig, res, normalize=True)
 		return res
 
 ##### TOD container #####
@@ -621,8 +626,18 @@ class PointingGenerator:
 		angpos = utils.rect2ang(zvec,axis=0, zenith=False)
 		# Make sure phi is between -180 and 180
 		angpos[0] = utils.rewind(angpos[0])
+
 		# Get the polarization orientation on the sky
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
+
+		# phi angle is undefined at poles. Get from previous point
+		# in this case. This is a hack. Additionally, while angpos
+		# had a weird value at the pole, gamma was consistent. So
+		# this should not have been an issue.
+		atpole = np.where((np.abs(angpos[1]-np.pi/2)<1e-8) | (np.abs(angpos[1]+np.pi/2)<1e-8))[0]
+		angpos[0,atpole] = angpos[0,atpole-1]
+		gamma[atpole]    = gamma[atpole-1]
+
 		## Apply our extra polarization rotation. See polrot_field.
 		#gamma -= angpos[0]*np.sin(angpos[1])
 		#gamma -= angpos[0]
@@ -649,6 +664,7 @@ def apply_beam_fullsky(map, new_beam, old_beam=None, lmax=None, ltest=10000, vte
 	# Prepare the map
 	if map.wcs.wcs.cdelt[0] > 0: map = map[...,:,::-1]
 	if map.wcs.wcs.cdelt[1] < 0: map = map[...,::-1,:]
+
 	map = enmap.samewcs(np.ascontiguousarray(map), map)
 	# Prepare b_l
 	if old_beam is None: old_beam = lambda l: l*0+1
@@ -784,8 +800,10 @@ class Field:
 		self.order= order
 		self.map  = map
 		self.pmap = pmap
+		self.npad = min(4, map.shape[-2]-1)
 		if self.pmap is None:
-			self.pmap = utils.interpol_prefilter(map, order=order)
+			self.pmap = side_pad(polar_pad(map, self.npad), self.npad)
+			self.pmap = utils.interpol_prefilter(self.pmap, order=order)
 		if copy:
 			self.map  = self.map.copy()
 			self.pmap = self.pmap.copy()
@@ -807,7 +825,10 @@ class Field:
 		returing res[{TQU},...]. fdims and pdims must be broadcastable
 		to each other."""
 		# amps will be [{TQU},pdims], so pdims and fdims must be broadcastable.
-		amps = self.pmap.at(pos, order=self.order, prefilter=False, mask_nan=False, safe=False)
+		# Take the padding into account
+		pix     = self.map.sky2pix(pos, safe=False)
+		pix    += self.npad
+		amps    = utils.interpol(self.pmap, pix, order=self.order, prefilter=False, mask_nan=False)
 		return self.spec(freq, amps, type=type)
 
 ##### Spectrum types #####
@@ -1266,7 +1287,7 @@ def fullsky_geometry(res=0.1*utils.degree, dims=()):
 	wcs.wcs.cdelt = [360./nx,180./ny]
 	wcs.wcs.crpix = [nx/2+1,ny/2+1]
 	wcs.wcs.ctype = ["RA---CAR","DEC--CAR"]
-	return dims+(ny+1,nx+1), wcs
+	return dims+(ny+1,nx+0), wcs
 
 def freq_geometry(fmax, nfreq):
 	wcs = enlib.wcs.WCS(naxis=1)
@@ -1493,3 +1514,17 @@ def rot_comps(d, ang, axis=0, off=None):
 	res[pre+(off+0,)] = d[pre+(off+0,)] * c - d[pre+(off+1,)] * s
 	res[pre+(off+1,)] = d[pre+(off+0,)] * s + d[pre+(off+1,)] * c
 	return res
+
+def polar_pad(map, npix):
+	"""Return map with the top and bottom extended using polar wrapping.
+	We assume clenshaw-curtis pixelization, and that the map has an even
+	number of pixels horizontally."""
+	nx = map.shape[-1]
+	return np.concatenate([
+		np.roll(map[...,npix:0:-1,:],nx/2,-1),
+		map,
+		np.roll(map[...,-2:-npix-2:-1,:],nx/2,-1)],-2)
+
+def side_pad(map, npix):
+	"""Return map with the left and right extended using cyclical wrapping."""
+	return np.concatenate([map[...,-npix:], map, map[...,:npix]],-1)

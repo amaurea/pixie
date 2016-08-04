@@ -60,14 +60,18 @@ for fname in args.tods[comm.rank::comm.size]:
 	point = pgen.calc_pointing(orient, elem.delay, np.array([0,0,0]))
 	phi   = point.angpos[0,0]
 	wcs.wcs.crpix[0] = 1 - phi/utils.degree/wcs.wcs.cdelt[0]
+	# Deconvolve time filter. This has almost no effect :/
+	readout_sim = pixie.ReadoutSim(config)
+	tod = readout_sim.sim_readout(tod, exp=-1)
 	# Detector measures 1/4 of the signal due to how the interferrometry
 	# is set up.
 	gain  = 1.0/4
-	# Ger out tod samples
+	# Get out tod samples
 	d   = tod.signal / gain
-	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
 	# Undo the effect of drift in theta and spin during each stroke
+	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
 	d   = pixie.fix_drift(d)
+	#dump(pre, d)
 	# Fourier-decompose the spin. *2 for pol because <sin^2> = 0.5.
 	fd  = fft.rfft(d, axes=[2])/d.shape[2]
 	d   = np.array([fd[:,:,0].real, fd[:,:,2].real*2, -fd[:,:,2].imag*2])
@@ -80,4 +84,3 @@ for fname in args.tods[comm.rank::comm.size]:
 	# Output as a ring file
 	m   = enmap.enmap(d, wcs, copy=False)
 	enmap.write_map(pre + ".fits", m)
-	#dump(pre, d)

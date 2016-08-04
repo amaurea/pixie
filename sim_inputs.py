@@ -4,6 +4,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("idir", nargs="?", default="inputs")
 parser.add_argument("odir", nargs="?", default="imaps")
 parser.add_argument("-r", "--res", type=float, default=0.1)
+parser.add_argument("-s", "--seed", type=int, default=0)
 parser.add_argument("--refsys-res",type=float, default=10)
 args = parser.parse_args()
 
@@ -11,6 +12,7 @@ args = parser.parse_args()
 # First generate the simulated CMB
 res = args.res*utils.degree
 shape, wcs = pixie.fullsky_geometry(res, dims=(3,))
+np.random.seed(args.seed)
 
 print colors.green + "Simulating reference blackbody" + colors.reset
 rshape, rwcs = pixie.fullsky_geometry(args.refsys_res*utils.degree, dims=(3,))
