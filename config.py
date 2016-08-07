@@ -36,16 +36,15 @@ tod_filters = [
 
 # These affect memory use and accuracy
 subsample_num    = 7
-#subsample_num    = 1
 subsample_method = "gauss"
 chunk_size       = 1e5
 
-# The detectors
+# The detectors. The white noise part has variance per second of sigma**2.
 dets = [
-	{"horn": 0, "response": [ 1, 1, 0]},
-	{"horn": 0, "response": [ 1,-1, 0]},
-	{"horn": 1, "response": [ 1, 1, 0]},
-	{"horn": 1, "response": [ 1,-1, 0]},
+		{"horn": 0, "response": [ 1, 1, 0], "sigma": 1e-15, "fknee": 0.1, "alpha": 3},
+		{"horn": 0, "response": [ 1,-1, 0], "sigma": 1e-15, "fknee": 0.1, "alpha": 3},
+		{"horn": 1, "response": [ 1, 1, 0], "sigma": 1e-15, "fknee": 0.1, "alpha": 3},
+		{"horn": 1, "response": [ 1,-1, 0], "sigma": 1e-15, "fknee": 0.1, "alpha": 3},
 ]
 
 # The barrels

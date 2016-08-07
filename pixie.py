@@ -359,6 +359,55 @@ class ReadoutSim:
 	injection, glitches, etc."""
 	def __init__(self, config):
 		self.filters = [parse_tod_filter(f) for f in config.tod_filters]
+		self.dets    = [parse_det(det) for det in config.dets]
+		self.dt      = config.sample_period
+	def sim_readout(self, tod, exp=1):
+		"""The main function, which applies all the readout effects, returning
+		the TOD one would actually see."""
+		# Only the frequency filter for now
+		dt    = (tod.elements[0,-1]-tod.elements[0,0])/(tod.nsamp-1)
+		tod.signal  = self.apply_filters(tod.signal, exp=exp)
+		tod.signal += self.gen_noise(tod.nsamp)
+		return tod
+	def apply_filters(self, signal, dt=None, exp=1):
+		# Actually apply the filters
+		if dt is None: dt = self.dt
+		freqs    = fft.rfftfreq(signal.shape[-1], dt)
+		signal   = signal.copy()
+		fsig     = fft.rfft(signal)
+		with utils.nowarn():
+			for f in self.filters:
+				fsig *= f(freqs)**exp
+		if exp < 0: fsig[~np.isfinite(fsig)] = 0
+		fft.ifft(fsig, signal, normalize=True)
+		return signal
+	def gen_noise(self, nsamp, dt=None, dets=None):
+		"""Generate noise using a 1/f noise model."""
+		# Both fourier transforms here could be avoided.
+		# The first one by generating random numbers in
+		# fourier space, and the second one by returning
+		# the fourier representation of the random numbers.
+		# But I think this way is clearer, and this shouldn't
+		# be a bottleneck anyway.
+		if dt   is None: dt   = self.dt
+		if dets is None: dets = self.dets
+		freqs    = fft.rfftfreq(nsamp, dt)
+		# Avoid division by zero
+		freqs[0] = 0.5*freqs[1]
+		res    = np.random.standard_normal((len(dets),nsamp)) / dt**0.5
+		fres   = fft.rfft(res)
+		for i, det in enumerate(dets):
+			fres[i] *= det.sigma*(1 + (freqs/det.fknee)**(-det.alpha))**0.5
+		fft.ifft(fres, res, normalize=True)
+		return res
+
+class ReadoutSimOld:
+	"""This class handles the signal from it has hit the detectors and until
+	it is read out. This is stuff like the tod highpass and lowpass, noise
+	injection, glitches, etc."""
+	def __init__(self, config):
+		self.filters = [parse_tod_filter(f) for f in config.tod_filters]
+		self.dets    = [parse_det(det) for det in config.dets]
 	def sim_readout(self, tod, exp=1):
 		"""The main function, which applies all the readout effects, returning
 		the TOD one would actually see."""
@@ -379,6 +428,8 @@ class ReadoutSim:
 		if exp < 0: fsig[~np.isfinite(fsig)] = 0
 		fft.ifft(fsig, res, normalize=True)
 		return res
+
+
 
 ##### TOD container #####
 
@@ -588,7 +639,6 @@ class PointingGenerator:
 		# period.
 		t -= scan * self.orbit_step_dur
 		ang_orbit = self.orbit_phase   + 2*np.pi*scan*self.orbit_step/self.orbit_period
-		#ang_orbit = self.orbit_phase   + 2*np.pi*np.floor(t/self.orbit_step)*self.orbit_step/self.orbit_period
 		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
 		ang_spin  = self.spin_phase    + 2*np.pi*t/self.spin_period
 		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
@@ -618,8 +668,10 @@ class PointingGenerator:
 		Rb = rot(Rb, "y", offset[1])
 		Rb = rot(Rb, "z", offset[2])
 		# Form the total rotation matrix
-		R = np.einsum("tij,jk->tik", orientation, Rb)
-		# Switch to t-last ordering, as it is easier to work with
+		R = np.einsum("ij,tjk->tik", Rb, orientation)
+		# Switch to t-last ordering, as it is easier to work with.
+		# Also transpose the system. This is why the multiplication
+		# order above is Rb*orientation rather than the other way around.
 		R = np.einsum("tik->kit", R)
 		# Extract the pointing angles
 		xvec, zvec = R[:,0], R[:,2]
@@ -994,12 +1046,17 @@ def parse_barrel(params):
 			sky      = sub["sky"],
 			filter   = sub["filter"],
 			beam     = sub["beam"],
-			offset   = sub["offset"],
+			offset   = np.array(sub["offset"])*utils.degree,
 			response = sub["response"]
 		) for sub in params]
 
 def parse_det(params):
-	return bunch.Bunch(horn=int(params["horn"]), response=np.array(params["response"]))
+	return bunch.Bunch(
+			horn    = int(params["horn"]),
+			response= np.array(params["response"]),
+			sigma   = float(params["sigma"]),
+			fknee   = float(params["fknee"]),
+			alpha   = float(params["alpha"]))
 
 def parse_tod_filter(params):
 	if params["type"] is "none":
@@ -1406,6 +1463,17 @@ def sim_cmb_map(shape, wcs, powspec, ps_unit=1e-6, lmax=None, seed=None, T_monop
 	if aberr_dir is None: aberr_dir = aberration.dir_ecl
 	m_abber = aberration.aberrate(m_lensed, dir=aberr_dir, beta=beta)
 	return m_unlensed, m_lensed, m_abber
+
+def sim_source_grid(shape, wcs, spacing=30*utils.degree, amp=1, lat_max=60*utils.degree, beam_sigma=1.0*utils.degree, polfrac=0.1):
+	m = enmap.zeros(shape, wcs)
+	pos = m.posmap()
+	for phi in np.arange(0, 2*np.pi, spacing):
+		for theta in np.arange(-lat_max, lat_max+1e-8, spacing):
+			print phi, theta
+			rad = utils.angdist([phi,theta], pos[::-1], zenith=False)
+			ang = phi + theta
+			m  += (amp*np.array([1, np.cos(2*ang)*polfrac, np.sin(2*ang)*polfrac]))[:,None,None]*np.exp(-0.5*rad**2/beam_sigma**2)
+	return m
 
 def sim_reference_blackbody(shape, wcs, T=None):
 	if T is None: T = Tcmb
