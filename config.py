@@ -39,20 +39,22 @@ subsample_num    = 7
 subsample_method = "gauss"
 chunk_size       = 1e5
 
-# The detectors. The white noise part has variance per second of sigma**2.
+# This is a more compact representation of the detector signals. The
+# signal part has been separated into a separate array of filter-beam-offset-response
+# combinations. The "signal" property gives the element from the signal
+# array to use for each barrel. The white noise in a detector has variance
+# per second of sigma**2.
 dets = [
-		{"horn": 0, "response": [ 1, 1, 0], "sigma": 1e-15, "fknee": 0.1, "alpha": 3},
-		{"horn": 0, "response": [ 1,-1, 0], "sigma": 1e-15, "fknee": 0.1, "alpha": 3},
-		{"horn": 1, "response": [ 1, 1, 0], "sigma": 1e-15, "fknee": 0.1, "alpha": 3},
-		{"horn": 1, "response": [ 1,-1, 0], "sigma": 1e-15, "fknee": 0.1, "alpha": 3},
+	{"horn":0, "signal":[0,0], "response":[ 1, 1, 0], "sigma":1e-15, "fknee":0.1, "alpha":3},
+	{"horn":0, "signal":[0,0], "response":[ 1,-1, 0], "sigma":1e-15, "fknee":0.1, "alpha":3},
+	{"horn":1, "signal":[0,0], "response":[ 1, 1, 0], "sigma":1e-15, "fknee":0.1, "alpha":3},
+	{"horn":1, "signal":[0,0], "response":[ 1,-1, 0], "sigma":1e-15, "fknee":0.1, "alpha":3},
 ]
 
-# The barrels
 I = [[1,0,0],[0,1,0],[0,0,1]]
-barrels = [
-	[{"sky": 0, "filter": 0, "beam": 0, "offset": [0,0,0], "response": I}],
-	[{"sky": 1, "filter": 0, "beam": 0, "offset": [0,0,0], "response": I}],
-]
+signals = [ [{"filter": 0, "beam": 0, "offset": [0,0,0], "response": I}] ]
+# Which sky each barrel sees
+barrels = [ {"sky":0}, {"sky":1} ]
 
 # The beams
 beams = [
