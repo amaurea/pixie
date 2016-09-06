@@ -4,6 +4,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("orbits")
 parser.add_argument("odir")
 parser.add_argument("-C", "--config", type=str, default=None)
+parser.add_argument("-s", "--seed",   type=int, default=0)
 args = parser.parse_args()
 
 fft.engine = "fftw"
@@ -16,9 +17,11 @@ config = pixie.load_config(args.config)
 sim    = pixie.PixieSim(config)
 utils.mkdir(args.odir)
 
-for ind in range(comm.rank, len(orbits), comm.size):
+for ind, orbit in enumerate(orbits):
 	orbit = orbits[ind]
 	L.info("orbit %3d" % orbit)
-	tod   = sim.sim_tod(orbit)
-	pixie.write_tod(args.odir + "/tod%03d.hdf" % orbit, tod)
+	np.random.seed([args.seed, orbit])
+	tod   = sim.sim_tod(orbit, comm=comm)
+	if comm.rank == 0:
+		pixie.write_tod(args.odir + "/tod%03d.hdf" % orbit, tod)
 	del tod

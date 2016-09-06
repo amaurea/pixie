@@ -64,6 +64,10 @@ filters = [
 	{"type": "gauss", "sigma": 1.5e12/2**0.5}
 ]
 
+# Sometimes a single, representative value is needed
+fiducial_beam   = 0
+fiducial_filter = 0
+
 # The skies
 skies = [
 	# The actual sky

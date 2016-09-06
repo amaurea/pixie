@@ -12,11 +12,12 @@ args = parser.parse_args()
 
 config = pixie.load_config(args.config)
 freqs  = pixie.parse_floats(args.freqs)
+print freqs
 beam_lmax = 1000
 #bsigma  = 1.9*utils.degree*utils.fwhm
 beam    = pixie.BeamGauss(1.9*utils.degree*utils.fwhm)
-fscatter= 1.5e12
-scatter = np.exp(-(freqs/fscatter)**2)
+#fscatter= 1.5e12
+#scatter = np.exp(-(freqs/fscatter)**2)
 
 # Load the fields of our chosen sky
 sky    = config.skies[args.sky]
@@ -67,16 +68,11 @@ if args.apply_beam:
 	print "Beam done"
 
 posmap = enmap.posmap(shape, wcs)
-maps = [field.at(freqs[:,None,None], posmap) for field in fields]
-#maps = [field.project(shape, wcs)(freqs) for field in fields]
-if args.apply_beam:
-	maps = [map*scatter[:,None,None,None] for map in maps]
+maps = [[field.at(freq, posmap) for freq in freqs] for field in fields]
 maps.insert(0, np.sum(maps,0))
 maps = enmap.ndmap(np.array(maps), wcs)
 
-# At this point we have a factor 4 higher values than our full
-# tod simulation. There is also a pixel shift issue, but that
-# should be simple.
+# We now have [comp,freq,stokes,y,x]
 
 if args.unit:
 	if args.unit == "cmb":

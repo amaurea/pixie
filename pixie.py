@@ -35,8 +35,8 @@ class PixieSim:
 	def __init__(self, config):
 		self.optics_sim  = OpticsSim(config)
 		self.readout_sim = ReadoutSim(config)
-	def sim_tod(self, i):
-		tod = self.optics_sim.gen_tod_orbit(i)
+	def sim_tod(self, i, comm=None):
+		tod = self.optics_sim.gen_tod_orbit(i, comm=comm)
 		tod = self.readout_sim.sim_readout(tod)
 		return tod
 
@@ -79,7 +79,7 @@ class OpticsSim:
 		self.skies = [[read_field(field) for field in sky] for sky in config.skies]
 
 		# Precompute effective sky for each sky-beam-filter combination.
-		with bench.show("setup_subskies"):
+		with bench.mark("setup_subskies"):
 			self.subskies = self.setup_subskies(self.skies, self.dets, self.barrels, self.signals, self.beams, self.filters)
 		# Computed
 		self.ncomp       = 3
@@ -90,42 +90,52 @@ class OpticsSim:
 		self.comm        = comm
 	@property
 	def ref_ctime(self): return self.pointgen.ref_ctime
-	def gen_tod_orbit(self, i):
+	def gen_tod_orbit(self, i, comm=None):
 		"""Generate the full TOD for orbit #i, defined as the samples
 		i*nsamp_orbit:(i+1)*nsamp_orbit. If the reference time is not
 		at the start of an orbit, the cut from one orbit to the next
 		will happen in the middle of these tods. We assume that there
 		is an integer number of samples in an orbit."""
 		samples = np.arange(i*self.nsamp_orbit,(i+1)*self.nsamp_orbit) + i*self.nsamp_step
-		return self.gen_tod_samples(samples)
-	def gen_tod_samples(self, samples):
+		return self.gen_tod_samples(samples, comm=comm)
+	def gen_tod_samples(self, samples, comm=None):
 		"""Generate time ordered data for the given sample indices.
 		The sample index starts at 0 at the reference time, and
 		increases by 1 for each sample_period seconds. This function
 		applies subchunking (to save memory) and subsampling (to simulate
 		continous integration inside each sample) automatically."""
-		tods   = []
 		nsamp  = len(samples)
+		res    = PixieTOD(np.zeros([self.ndet, nsamp]), np.zeros([5, nsamp]))
 		ctimes = self.ref_ctime + np.asarray(samples)*float(self.sample_period)
-		for i in range(0, nsamp, self.chunk_size):
-			L.debug("chunk %3d/%d" % (i/self.chunk_size, (nsamp+self.chunk_size-1)/self.chunk_size))
-			# +1 for the extra overlap-sample, which we will use to remove
-			# any discontinuities caused by interpolation issues.
-			mytimes = ctimes[i:i+self.chunk_size+1]
+		nchunk = (nsamp+self.chunk_size-1)/self.chunk_size
+		rank, nproc = (comm.rank, comm.size) if comm is not None else (0,1)
+		for chunk in range(rank, nchunk, nproc):
+			i = chunk*self.chunk_size
+			L.debug("chunk %3d/%d" % (chunk, nchunk))
+			mytimes = ctimes[i:i+self.chunk_size]
 			subtimes, weights = subsample(mytimes, self.subsample_num, self.subsample_method)
 			subtod  = self.gen_tod_raw(subtimes)
-			with bench.show("downsample"):
+			with bench.mark("downsample"):
 				mytod   = downsample_tod_blockwise(subtod, weights)
 			del subtod, subtimes, weights, mytimes
-			tods.append(mytod)
-		return concatenate_tod(tods)
+			# Initialize total, concatenated tod if needed
+			# Copy over values to correct location
+			res.signal[:,i:i+self.chunk_size]   = mytod.signal
+			res.elements[:,i:i+self.chunk_size] = mytod.elements
+			#if res.point is not None:
+			#	res.point[:,i:i+self.chunk_size] = mytod.point
+			#if res.pix is not None:
+			#	res.pix[:,i:i+self.chunk_size] = mytod.pix
+		# Collect result from different mpi tasks
+		res = allreduce_tod(res, comm)
+		return res
 	def gen_tod_raw(self, ctimes):
 		"""Generate the time-ordered data for the sample times given in ctimes.
 		No oversampling is done, nor is chunking. This is a helper function that
 		should usually not be called directly. The result has units W/sr/m^2."""
-		with bench.show("calc_elements"):
+		with bench.mark("calc_elements"):
 			elements    = self.pointgen.calc_elements(ctimes)
-		with bench.show("calc_orientation"):
+		with bench.mark("calc_orientation"):
 			orientation = self.pointgen.calc_orientation(elements)
 		def get_cache(cache, key, fun):
 			if key not in cache: cache[key] = fun()
@@ -140,19 +150,19 @@ class OpticsSim:
 				for isub, sub in enumerate(self.signals[isig]):
 					isky    = self.barrels[ibarrel].sky
 					sky     = self.subskies[(isky, sub.beam, sub.filter)]
-					with bench.show("calc_pointing"):
+					with bench.mark("calc_pointing"):
 						point   = get_cache(point_cache, tuple(sub.offset), lambda:
 								self.pointgen.calc_pointing(orientation, elements.delay, sub.offset))
-					with bench.show("calc_sky_signal"):
+					with bench.mark("calc_sky_signal"):
 						sky_sig = get_cache(sky_sig_cache, (isky,tuple(sub.offset)), lambda:
 								calc_sky_signal(sky, point.angpos, point.delay))
-					with bench.show("calc_response"):
+					with bench.mark("calc_response"):
 						det_resp = np.dot(det.response, sub.response)
 						same = det.horn==ibarrel
 						sky_resp = get_cache(sky_resp_cache,
 								(isky,tuple(sub.offset),tuple(det_resp),same),
 								lambda: calc_response(point.gamma, det_resp, same))
-					with bench.show("calc_det_signal"):
+					with bench.mark("calc_det_signal"):
 						det_sig[idet] += calc_det_signal(sky_sig, sky_resp)
 		del point_cache, sky_sig_cache, sky_resp_cache
 		return PixieTOD(
@@ -229,6 +239,7 @@ class ReadoutSim:
 		for i, det in enumerate(dets):
 			fres[i] *= det.sigma*(1 + (freqs/det.fknee)**(-det.alpha))**0.5
 		fft.ifft(fres, res, normalize=True)
+		print "DEBUG: Added noise with std", np.std(res)
 		return res
 
 ##### TOD container #####
@@ -278,10 +289,18 @@ def downsample_tod_blockwise(tod, weights, bsize=0x1000):
 def concatenate_tod(tods):
 	"""Concatenate a list of tods into a single one."""
 	return PixieTOD(
-			overlap_cat([tod.signal   for tod in tods],-1),
-			overlap_cat([tod.elements for tod in tods],-1),
-			overlap_cat([tod.point    for tod in tods],-1) if tods[0].point is not None else None,
-			overlap_cat([tod.pix      for tod in tods],-1) if tods[0].pix   is not None else None)
+			np.concatenate([tod.signal   for tod in tods],-1),
+			np.concatenate([tod.elements for tod in tods],-1),
+			np.concatenate([tod.point    for tod in tods],-1) if tods[0].point is not None else None,
+			np.concatenate([tod.pix      for tod in tods],-1) if tods[0].pix   is not None else None)
+
+def allreduce_tod(tod, comm):
+	if comm is None: return PixieTOD(tod.signal, tod.elements, tod.point, tod.pix)
+	return PixieTOD(
+		utils.allreduce(tod.signal, comm),
+		utils.allreduce(tod.elements, comm),
+		utils.allreduce(tod.point, comm) if tod.point is not None else None,
+		utils.allreduce(tod.pix, comm) if tod.pix is not None else None)
 
 def write_tod(fname, tod):
 	with h5py.File(fname, "w") as hfile:
@@ -462,6 +481,14 @@ class PointingGenerator:
 		# Get the polarization orientation on the sky
 		gamma = np.arctan2(xvec[2], -zvec[1]*xvec[0]+zvec[0]*xvec[1])
 
+		# Behavior near the poles indicates that gamma isn't being calculated
+		# correctly. The part from the spin seems OK (though it wouldn't be
+		# very sensitive to a sign flip), but the part from the displacement
+		# on the sky seems to be wrong, as we when using offset beams, which
+		# result in a sign flip near the poles. An overall sign flip
+		# may be enough to fix both this behavior and the U flip needed in tod2ring.
+		gamma *= -1
+
 		# phi angle is undefined at poles. Get from previous point
 		# in this case. This is a hack. Additionally, while angpos
 		# had a weird value at the pole, gamma was consistent. So
@@ -470,9 +497,6 @@ class PointingGenerator:
 		angpos[0,atpole] = angpos[0,atpole-1]
 		gamma[atpole]    = gamma[atpole-1]
 
-		## Apply our extra polarization rotation. See polrot_field.
-		#gamma -= angpos[0]*np.sin(angpos[1])
-		#gamma -= angpos[0]
 		return bunch.Bunch(angpos=angpos, gamma=gamma, delay=delay, pos=zvec)
 
 def calc_pixels(angpos, delay, wcs_pos, wcs_delay):
@@ -1195,19 +1219,6 @@ def pad_geometry(shape, wcs, pad):
 	owcs.wcs.crpix += pad_pix
 	oshape = tuple(shape[:-2]) + tuple(np.array(shape[-2:])+2*pad_pix)
 	return oshape, owcs
-
-def overlap_cat(arrays, axis=-1, n=1):
-	"""Given a list of arrays [:][...,nsamp], where each array has n overlap with the
-	previous. Return the concatenation of the arrays along the last dimension after
-	discarding overlapping samples and adding offsets needed to make those samples match."""
-	work = [arrays[0]]
-	for array in arrays[1:]:
-		a = utils.moveaxis(work[-1],axis,-1)
-		b = utils.moveaxis(array,   axis,-1)
-		off = np.mean(b[...,:n]-a[...,-n:],-1)
-		c = b[...,n:] - off[...,None]
-		work.append(utils.moveaxis(c, -1, axis))
-	return np.concatenate(work,axis)
 
 def sim_cmb_map(shape, wcs, powspec, ps_unit=1e-6, lmax=None, seed=None, T_monopole=None, verbose=False, beta=None, aberr_dir=None, oversample=2):
 	"""Simulate lensed cmb map with the given [phi,T,E,B]-ordered
