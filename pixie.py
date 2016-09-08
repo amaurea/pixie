@@ -360,6 +360,7 @@ def calc_response(gamma, det_resp, same, bsize=0x10000):
 	or the other barrel (same=False), to TQU entering each horn,
 	after taking coordinate transformations, interferometric mixing
 	and beam responsitivity into account. det_resp is [{TQU}].
+	Returns [{DC,delay},{TQU},samps].
 	"""
 	ntime, ncomp = gamma.size, 3
 	res = np.zeros([2, ncomp, ntime])
@@ -981,6 +982,7 @@ class InterpolatedTaylorLookup:
 class SpecInterpol:
 	"""This class allows fast lookups of spectrum and spectrogram (time
 	correlation function) values."""
+	# FIXME: incrase accuracy without insanely high nsamp
 	def __init__(self, specfun, Tref, filter=None, nsamp=50000, order=3, taylor=3, fmax=None, **kwargs):
 		"""specfun(freqs, T, T_derivs=num, **kwargs):
 		  A function implementing the spectrum to be interpolated.

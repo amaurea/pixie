@@ -91,6 +91,7 @@ for fname in args.tods[comm.rank::comm.size]:
 	gain  = 1.0/4
 	# Get out tod samples
 	d   = tod.signal / gain
+	dump(pre+"_1", d)
 	# Deconvolve the sample window. Each of our samples
 	# is approximately the integral of the signal inside its
 	# duration.
@@ -100,15 +101,18 @@ for fname in args.tods[comm.rank::comm.size]:
 	# Undo the effect of drift in theta and spin during each stroke
 	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
 	d   = pixie.fix_drift(d)
-	#dump(pre, d)
+	dump(pre+"_2", d)
 	# Fourier-decompose the spin. *2 for pol because <sin^2> = 0.5.
 	fd  = fft.rfft(d, axes=[2])/d.shape[2]
 	d   = np.array([fd[:,:,0].real, fd[:,:,2].real*2, fd[:,:,2].imag*2])
+	dump(pre+"_3", d)
 	# Go from stroke to spectrum. This takes us to W/sr/m^2/Hz
 	d   = fft.rfft(d).real[...,::2]*2/ndelay/dfreq
+	dump(pre+"_4", d)
 	# Unapply the frequency filter
 	freqs = np.arange(d.shape[-1])*dfreq
 	d  /= filter(freqs)
+	dump(pre+"_5", d)
 	# Reorder from [stokes,det,theta,phi,freq] to [det,freq,stokes,theta,phi]
 	d   = d[:,:,:,None,:]
 	d   = utils.moveaxes(d, (1,4,0,2,3), (0,1,2,3,4))
