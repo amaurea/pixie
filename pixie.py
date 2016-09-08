@@ -360,6 +360,7 @@ def calc_response(gamma, det_resp, same, bsize=0x10000):
 	or the other barrel (same=False), to TQU entering each horn,
 	after taking coordinate transformations, interferometric mixing
 	and beam responsitivity into account. det_resp is [{TQU}].
+	Returns [{DC,delay},{TQU},samps].
 	"""
 	ntime, ncomp = gamma.size, 3
 	res = np.zeros([2, ncomp, ntime])
