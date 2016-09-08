@@ -675,7 +675,7 @@ class Field:
 class SpecBlackbody:
 	type = "blackbody"
 	def __init__(self, name, Tref, dmax=0.01, filter=None):
-		self.set(name=name, Tref=Tref, filter=filter)
+		self.set(name=name, Tref=Tref, dmax=dmax, filter=filter)
 	def set(self, **kwargs):
 		for key in kwargs: setattr(self, key, kwargs[key])
 		if len(set(kwargs) & set(["Tref","filter","dmax"])) == 0: return
@@ -704,7 +704,7 @@ class SpecGraybody:
 	scaling."""
 	type = "graybody"
 	def __init__(self, name, T, beta, fref, unit, dmax=0.01, filter=None):
-		self.set(name=name, T=T, beta=beta, fref=fref, unit=unit, filter=filter)
+		self.set(name=name, T=T, beta=beta, fref=fref, unit=unit, dmax=dmax, filter=filter)
 	def set(self, **kwargs):
 		for key in kwargs: setattr(self, key, kwargs[key])
 		if len(set(kwargs) & set(["T","filter","beta","dmax"])) == 0: return
