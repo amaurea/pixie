@@ -76,7 +76,7 @@ class OpticsSim:
 		self.signals = [parse_signal(sig) for sig in config.signals]
 
 		# Skies. Each sky is a list of fields, such as cmb or dust
-		self.skies = [[read_field(field) for field in sky] for sky in config.skies]
+		self.skies = [[read_field(field, dmax=config.delay_amp) for field in sky] for sky in config.skies]
 
 		# Precompute effective sky for each sky-beam-filter combination.
 		with bench.mark("setup_subskies"):
@@ -551,7 +551,7 @@ def apply_beam_fullsky(map, new_beam, old_beam=None, lmax=None, ltest=10000, vte
 	sht.alm2map(alm[1:], map[1:].reshape(2,-1), spin=2)
 	return map
 
-def read_field(fname):
+def read_field(fname, dmax=None):
 	"""Read a field from a specially prepared fits file."""
 	map    = enmap.read_map(fname)
 	header = astropy.io.fits.open(fname)[0].header
@@ -562,10 +562,10 @@ def read_field(fname):
 		# The reference temperature is the temperature we will
 		# Taylor expand around, to it should be as representative as possible
 		Tref = np.mean(map[0,::10,::10])
-		spec = SpecBlackbody(name, Tref=Tref)
+		spec = SpecBlackbody(name, Tref=Tref, dmax=dmax)
 	elif spec_type == "GRAY":
 		spec = SpecGraybody(name, T=float(header["TBODY"]), beta=float(header["BETA"]),
-				fref=float(header["FREF"]), unit=float(header["SUNIT"]))
+				fref=float(header["FREF"]), unit=float(header["SUNIT"], dmax=dmax))
 	else: raise ValueError("Spectrum type '%s' not recognized" % spec_type)
 	# Get the beam information
 	beam_type = header["BEAM"]
@@ -675,12 +675,13 @@ class Field:
 
 class SpecBlackbody:
 	type = "blackbody"
-	def __init__(self, name, Tref, filter=None):
+	def __init__(self, name, Tref, dmax=0.01, filter=None):
 		self.set(name=name, Tref=Tref, filter=filter)
 	def set(self, **kwargs):
 		for key in kwargs: setattr(self, key, kwargs[key])
-		if len(set(kwargs) & set(["Tref","filter"])) == 0: return
-		self.core = SpecInterpol(blackbody, self.Tref, filter=self.filter)
+		if len(set(kwargs) & set(["Tref","filter","dmax"])) == 0: return
+		fmax = 120*kb*self.Tref/h
+		self.core = SpecInterpol(blackbody, self.Tref, fmax, self.dmax, filter=self.filter)
 	def __call__(self, freq, amps, type="spec"):
 		"""Evaluate the frequency spectrum at the frequencies
 		given by freq for the given blackbody amplitudes[{T,Q,U}].
@@ -703,15 +704,16 @@ class SpecGraybody:
 	and the T amplitude just represents differenting optical depth
 	scaling."""
 	type = "graybody"
-	def __init__(self, name, T, beta, fref, unit, filter=None):
+	def __init__(self, name, T, beta, fref, unit, dmax=0.01, filter=None):
 		self.set(name=name, T=T, beta=beta, fref=fref, unit=unit, filter=filter)
 	def set(self, **kwargs):
 		for key in kwargs: setattr(self, key, kwargs[key])
-		if len(set(kwargs) & set(["T","filter","beta"])) == 0: return
+		if len(set(kwargs) & set(["T","filter","beta","dmax"])) == 0: return
 		# Taylor is 0 because we will only call this with a fixed temperature
 		# for now. May want to change this to support more general dust models
 		# later.
-		self.core = SpecInterpol(graybody, self.T, filter=self.filter, beta=self.beta, taylor=0)
+		fmax = 120*kb*self.Tref/h
+		self.core = SpecInterpol(graybody, self.T, fmax, self.dmax, filter=self.filter, beta=self.beta, taylor=0)
 		self.ref_scale = graybody(self.fref, self.T, self.beta)
 	def __call__(self, freq, amps, type="spec"):
 		"""Evaluate the frequency spectrum at the frequencies
@@ -948,21 +950,50 @@ def graybody(freqs, T, beta, T_derivs=None):
 		res = res[0]
 	return res
 
+def spec_test(freqs, T, T_derivs=None):
+	"""Simple test spectrum with an analytical tcorr. It is a simple
+	step function in freq, which means that the tcorr should be a sinc"""
+	fcut = 1e12
+	freqs, T = broadcast_stack(freqs, T)
+	if T_derivs is not None: norder = T_derivs + 1
+	res = np.zeros((norder,)+np.broadcast(freqs,T).shape)
+	if norder > 0: res[0] = T*(freqs<fcut)
+	if norder > 1: res[1] = freqs<fcut
+	res[2:] = 0
+	if T_derivs is None: res = res[0]
+	return res
+
+def tcorr_test(delays, T):
+	"""The tcorr corresponding to spec_test"""
+	# The time-correlation function is
+	# tcorr(dt) = <a(t)a(t+dt)>
+	#  = <F(t)ak F(t+dt)ak>
+	#  = <int exp(ipkt) a(k) dk int exp(ipj(t+dt)) a(j)>
+	#  = int dk ak int dj aj exp(ij dt) <exp(ip(k+j)t)>
+	#  = int dk ak int dj aj exp(ij dt) delta(k+j)
+	#  = int dk |a(k)|^2 exp(-ik dt)
+	# For my function, a(f) = f<fcut, so the interval is
+	# simply int_-fcut^fcut exp(-ip f dt) df
+	#  = 1/(ip dt) [exp(ip fcut dt) - exp(-ip fcut dt)]
+	#  = 2 fcut sinc(fcut*dt)
+	fcut = 1e12
+	return fcut*np.sinc(2*fcut*delays/c)*T
+
 class InterpolatedTaylorLookup:
-	def __init__(self, coeffs, pstep, interpol=3, x0=0):
+	def __init__(self, coeffs, pstep, order=3, x0=0):
 		"""Construct an object that can be used to approximate some function
 		by using the coefficients of its taylor expansion, where these coefficients
 		are a function of position and are regularly sampled with interval pstep.
 		coeffs is an array [order+1,npos], where the corresponding positions are
-		[0,1*pstep,2*pstep,...]. The optional argument interpol specifies the
+		[0,1*pstep,2*pstep,...]. The optional argument order specifies the
 		order of the interpolation to be used when looking up the taylor expansion
 		coefficients given a position. This is not the same thing as the order
 		to be used in the taylor expansion, which is given by the number of
 		coefficients passed in."""
 		self.coeffs = coeffs
-		self.coeffs_pre = [utils.interpol_prefilter(coeff, npre=0, order=interpol) for coeff in coeffs]
+		self.coeffs_pre = [utils.interpol_prefilter(coeff, npre=0, order=order) for coeff in coeffs]
 		self.pstep    = pstep
-		self.interpol = interpol
+		self.order    = order
 		self.x0       = x0
 	def __call__(self, pos, x, order=None):
 		"""Evaluate the function at positions pos[:] for the function
@@ -973,7 +1004,7 @@ class InterpolatedTaylorLookup:
 		dx  = x-self.x0
 		res, fac = None, 1.0
 		for i in range(order+1):
-			c = utils.interpol(self.coeffs_pre[i], pix[None], order=self.interpol, prefilter=False)
+			c = utils.interpol(self.coeffs_pre[i], pix[None], order=self.order, prefilter=False)
 			if res is None: res = c*dx**0
 			else: res += fac*dx**i*c
 			fac /= (i+1)
@@ -982,8 +1013,8 @@ class InterpolatedTaylorLookup:
 class SpecInterpol:
 	"""This class allows fast lookups of spectrum and spectrogram (time
 	correlation function) values."""
-	# FIXME: incrase accuracy without insanely high nsamp
-	def __init__(self, specfun, Tref, filter=None, nsamp=50000, order=3, taylor=3, fmax=None, **kwargs):
+	def __init__(self, specfun, Tref, fmax, dmax, filter=None, order=3, taylor=3,
+			nsub=10, **kwargs):
 		"""specfun(freqs, T, T_derivs=num, **kwargs):
 		  A function implementing the spectrum to be interpolated.
 		  Returns spectrum[num,nfreq]
@@ -997,9 +1028,31 @@ class SpecInterpol:
 		fmax [float]: The highest frequency to use in the interpolation. Should
 		  be high enough to encompass the whole spectrum.
 		Any additional arguments are passed on to specfun."""
-		if fmax is None: fmax = kb*Tref/h*100
+		# Since spec and tcorr are fourier transforms of each other,
+		# their resolutions and max ranges are related.
+		# dstep = c/(2*fstep*(nfreq-1)) = 0.5*c/fmax (half because lowest freq only does half a swing)
+		# fstep = c/(2*dstep*(ndelay-1))= 0.5*c/dmax
+		# For fmax=0.4e14 we get dstep = 3.7e-6, compared to 1e-4 for the tcorr wavelength,
+		# giving 27 points per wavelength, which isn't that high.
+		# Conversely, dmax=0.01 gives fstep = 1.5e10, which isn't that high either.
+		# So we want to oversample both. We oversample spec by
+		# decreasing fstep, and oversample tcorr by increasing fmax.
+		# This makes each spectrum doubly overscaled, so after they
+		# have been transformed, they can be truncated.
+		#
+		# Where does the (nfreq-1) part come from? Why isn't it just nfreq?
+		# When using nfreq-1, I get much better convergence than with just
+		# nfreq. If we have nfreq frequency and the lowest one is 0, then
+		# the highest frequency is actually (nfreq-1)*dstep, and that's what
+		# determines the sample spacing of the other function.
+		fmax  = fmax*nsub
+		dmax  = dmax*nsub
+		fstep = 0.5*c/dmax
+		dstep = 0.5*c/fmax
+		nsamp = np.ceil(fmax/fstep)
+
 		fwcs  = freq_geometry(fmax, nsamp)
-		freqs = fwcs.wcs_pix2world(np.arange(nsamp),0)[0]
+		freqs = np.arange(nsamp)*fwcs.wcs.cdelt[0]
 		spec_series = specfun(freqs, Tref, T_derivs=taylor, **kwargs)
 		# Apply filter if necessary
 		if filter is not None:
@@ -1010,15 +1063,65 @@ class SpecInterpol:
 		tcorr_series = []
 		for spec in spec_series:
 			tcorr, twcs = spec2delay(spec, fwcs)
+			# Drop tcorr oversampling
+			tcorr = tcorr[:tcorr.size/nsub]
 			tcorr_series.append(tcorr)
+		# Drop spec oversampling
+		spec_series = [spec[:spec.size/nsub] for spec in spec_series]
 		# Build our Taylor lookups
-		self.tcorr_lookup = InterpolatedTaylorLookup(tcorr_series, twcs.wcs.cdelt[0], interpol=order, x0=Tref)
-		self.spec_lookup  = InterpolatedTaylorLookup(spec_series,  fwcs.wcs.cdelt[0], interpol=order, x0=Tref)
+		self.tcorr_lookup = InterpolatedTaylorLookup(tcorr_series, twcs.wcs.cdelt[0], order=order, x0=Tref)
+		self.spec_lookup  = InterpolatedTaylorLookup(spec_series,  fwcs.wcs.cdelt[0], order=order, x0=Tref)
 		self.filter = filter
 	def eval_spec (self, freq,  T, order=None):
 		return self.spec_lookup (np.abs(freq), T, order=order)
 	def eval_tcorr(self, delay, T, order=None):
 		return self.tcorr_lookup(np.abs(delay), T, order=order)
+
+#class SpecInterpol:
+#	"""This class allows fast lookups of spectrum and spectrogram (time
+#	correlation function) values."""
+#	def __init__(self, specfun, Tref, filter=None, nsamp=5000, order=3, taylor=3, fmax=None, 
+#			foversample=10, toversample=10, **kwargs):
+#		"""specfun(freqs, T, T_derivs=num, **kwargs):
+#		  A function implementing the spectrum to be interpolated.
+#		  Returns spectrum[num,nfreq]
+#		Tref: The temperature to Taylor-expand the spectrum around. The spectrum
+#		  is assumed to be a nonlinear function of the temperature.
+#		filter(freqs): An optional frequency response function, which the spectrum
+#		  is multiplied by.
+#		nsamp [int]: The number of samples to use in the interpolation
+#		order [int]: The spline order to use in the interpolation
+#		taylor [int]: The order of the Taylor expansion
+#		fmax [float]: The highest frequency to use in the interpolation. Should
+#		  be high enough to encompass the whole spectrum.
+#		Any additional arguments are passed on to specfun."""
+#		if fmax is None: fmax = kb*Tref/h*100*toversample
+#		fwcs  = freq_geometry(fmax, nsamp)
+#		fwcs2 = freq_geometry(fmax, nsamp*foversample)
+#		freqs = np.arange(nsamp*foversample)*fwcs2.wcs.cdelt[0]
+#		spec_series = specfun(freqs, Tref, T_derivs=taylor, **kwargs)
+#		# Apply filter if necessary
+#		if filter is not None:
+#			filter_vals = filter(freqs)
+#			for spec in spec_series:
+#				spec *= filter_vals
+#		# Transform each order of the Taylor series
+#		tcorr_series = []
+#		for spec in spec_series:
+#			tcorr, twcs = spec2delay(spec, fwcs2)
+#			# Drop tcorr oversampling
+#			tcorr = tcorr[:tcorr.size/foversample]
+#			tcorr_series.append(tcorr)
+#		# Drop spec oversampling
+#		spec_series = [spec[::foversample] for spec in spec_series]
+#		# Build our Taylor lookups
+#		self.tcorr_lookup = InterpolatedTaylorLookup(tcorr_series, twcs.wcs.cdelt[0], order=order, x0=Tref)
+#		self.spec_lookup  = InterpolatedTaylorLookup(spec_series,  fwcs.wcs.cdelt[0], order=order, x0=Tref)
+#		self.filter = filter
+#	def eval_spec (self, freq,  T, order=None):
+#		return self.spec_lookup (np.abs(freq), T, order=order)
+#	def eval_tcorr(self, delay, T, order=None):
+#		return self.tcorr_lookup(np.abs(delay), T, order=order)
 
 # These are superceded by SpecInterpol. They use a different philosophy
 # that lets them cover all temperatures, not just those close to a reference
@@ -1086,13 +1189,13 @@ def delay2spec(arr, wcs, axis=0, inplace=False, bsize=32):
 
 def wcs_delay2spec(wcs, ndelay):
 	owcs = wcs.deepcopy()
-	owcs.wcs.cdelt[0] = c/wcs.wcs.cdelt[0]/ndelay/2
+	owcs.wcs.cdelt[0] = c/wcs.wcs.cdelt[0]/(ndelay-1)/2
 	owcs.wcs.ctype[0] = 'FREQ'
 	return owcs
 
 def wcs_spec2delay(wcs, nfreq):
 	owcs = wcs.deepcopy()
-	owcs.wcs.cdelt[0] = c/wcs.wcs.cdelt[0]/nfreq/2
+	owcs.wcs.cdelt[0] = c/wcs.wcs.cdelt[0]/(nfreq-1)/2
 	owcs.wcs.ctype[0] = 'TIME'
 	return owcs
 
@@ -1140,7 +1243,9 @@ def fullsky_geometry(res=0.1*utils.degree, dims=()):
 
 def freq_geometry(fmax, nfreq):
 	wcs = enlib.wcs.WCS(naxis=1)
-	wcs.wcs.cdelt[0] = float(fmax)/nfreq
+	# The highest frequency is fmax/(nfreq-1), since
+	# the zero frequency is included.
+	wcs.wcs.cdelt[0] = float(fmax)/(nfreq-1)
 	wcs.wcs.crpix[0] = 1
 	wcs.wcs.ctype[0] = 'FREQ'
 	return wcs
