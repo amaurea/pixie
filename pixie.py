@@ -76,15 +76,16 @@ class OpticsSim:
 		self.signals = [parse_signal(sig) for sig in config.signals]
 
 		# Skies. Each sky is a list of fields, such as cmb or dust
-		self.skies = [[read_field(field, dmax=config.delay_amp) for field in sky] for sky in config.skies]
+		self.skies = [[read_field(field, dmax=config.delay_amp*1.1) for field in sky] for sky in config.skies]
 
 		# Precompute effective sky for each sky-beam-filter combination.
 		with bench.mark("setup_subskies"):
 			self.subskies = self.setup_subskies(self.skies, self.dets, self.barrels, self.signals, self.beams, self.filters)
-		# Computed
+
 		self.ncomp       = 3
 		self.nhorn       = 2
 		self.ndet        = len(self.dets)
+		self.no_dc       = config.no_dc
 		self.nsamp_orbit = int(np.round(self.pointgen.scan_period/self.sample_period))
 		self.nsamp_step  = int(np.round(self.pointgen.orbit_step_dur/self.sample_period))
 		self.comm        = comm
@@ -162,6 +163,7 @@ class OpticsSim:
 						sky_resp = get_cache(sky_resp_cache,
 								(isky,tuple(sub.offset),tuple(det_resp),same),
 								lambda: calc_response(point.gamma, det_resp, same))
+						if self.no_dc: sky_resp[0] = 0
 					with bench.mark("calc_det_signal"):
 						det_sig[idet] += calc_det_signal(sky_sig, sky_resp)
 		del point_cache, sky_sig_cache, sky_resp_cache
@@ -565,7 +567,7 @@ def read_field(fname, dmax=None):
 		spec = SpecBlackbody(name, Tref=Tref, dmax=dmax)
 	elif spec_type == "GRAY":
 		spec = SpecGraybody(name, T=float(header["TBODY"]), beta=float(header["BETA"]),
-				fref=float(header["FREF"]), unit=float(header["SUNIT"], dmax=dmax))
+				fref=float(header["FREF"]), unit=float(header["SUNIT"]), dmax=dmax)
 	else: raise ValueError("Spectrum type '%s' not recognized" % spec_type)
 	# Get the beam information
 	beam_type = header["BEAM"]
@@ -675,7 +677,8 @@ class Field:
 
 class SpecBlackbody:
 	type = "blackbody"
-	def __init__(self, name, Tref, dmax=0.01, filter=None):
+	def __init__(self, name, Tref, dmax=None, filter=None):
+		if dmax is None: dmax = 0.01
 		self.set(name=name, Tref=Tref, dmax=dmax, filter=filter)
 	def set(self, **kwargs):
 		for key in kwargs: setattr(self, key, kwargs[key])
@@ -704,7 +707,8 @@ class SpecGraybody:
 	and the T amplitude just represents differenting optical depth
 	scaling."""
 	type = "graybody"
-	def __init__(self, name, T, beta, fref, unit, dmax=0.01, filter=None):
+	def __init__(self, name, T, beta, fref, unit, dmax=None, filter=None):
+		if dmax is None: dmax = 0.01
 		self.set(name=name, T=T, beta=beta, fref=fref, unit=unit, dmax=dmax, filter=filter)
 	def set(self, **kwargs):
 		for key in kwargs: setattr(self, key, kwargs[key])
@@ -712,7 +716,7 @@ class SpecGraybody:
 		# Taylor is 0 because we will only call this with a fixed temperature
 		# for now. May want to change this to support more general dust models
 		# later.
-		fmax = 120*kb*self.Tref/h
+		fmax = 120*kb*self.T/h
 		self.core = SpecInterpol(graybody, self.T, fmax, self.dmax, filter=self.filter, beta=self.beta, taylor=0)
 		self.ref_scale = graybody(self.fref, self.T, self.beta)
 	def __call__(self, freq, amps, type="spec"):
@@ -1014,7 +1018,7 @@ class SpecInterpol:
 	"""This class allows fast lookups of spectrum and spectrogram (time
 	correlation function) values."""
 	def __init__(self, specfun, Tref, fmax, dmax, filter=None, order=3, taylor=3,
-			nsub=10, **kwargs):
+			nsub=30, **kwargs):
 		"""specfun(freqs, T, T_derivs=num, **kwargs):
 		  A function implementing the spectrum to be interpolated.
 		  Returns spectrum[num,nfreq]
@@ -1050,6 +1054,7 @@ class SpecInterpol:
 		fstep = 0.5*c/dmax
 		dstep = 0.5*c/fmax
 		nsamp = np.ceil(fmax/fstep)
+		print "nsamp", nsamp
 
 		fwcs  = freq_geometry(fmax, nsamp)
 		freqs = np.arange(nsamp)*fwcs.wcs.cdelt[0]

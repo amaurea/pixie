@@ -94,10 +94,12 @@ for fname in args.tods[comm.rank::comm.size]:
 	dump(pre+"_1", d)
 	# Deconvolve the sample window. Each of our samples
 	# is approximately the integral of the signal inside its
-	# duration.
-	fd  = fft.rfft(d, axes=[-1])
-	fd /= np.sinc(np.arange(fd.shape[-1],dtype=float)/d.shape[-1])
-	d   = fft.ifft(fd, d, axes=[-1], normalize=True)
+	# duration. If subsample_num is 1, then we assume the
+	# data has no sample window.
+	if config.subsample_num > 1:
+		fd  = fft.rfft(d, axes=[-1])
+		fd /= np.sinc(np.arange(fd.shape[-1],dtype=float)/d.shape[-1])
+		d   = fft.ifft(fd, d, axes=[-1], normalize=True)
 	# Undo the effect of drift in theta and spin during each stroke
 	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
 	d   = pixie.fix_drift(d)
