@@ -438,16 +438,16 @@ class PointingGenerator:
 		# and discontinuities are confined to the middle of the transition
 		# period.
 		t -= scan * self.orbit_step_dur
-		ang_orbit = self.orbit_phase   + 2*np.pi*scan*self.orbit_step/self.orbit_period
-		ang_scan  = self.scan_phase    + 2*np.pi*t/self.scan_period
-		ang_spin  = self.spin_phase    + 2*np.pi*t/self.spin_period
-		ang_delay = self.delay_phase   + 2*np.pi*t/self.delay_period
+		ang_orbit  = self.orbit_phase   + 2*np.pi*scan*self.orbit_step/self.orbit_period
+		ang_scan   = self.scan_phase    + 2*np.pi*t/self.scan_period
+		ang_spin   = self.spin_phase    + 2*np.pi*t/self.spin_period
 		if self.delay_shape == "sin":
-			delay = self.delay_amp * np.sin(ang_delay)
+			delay = self.delay_amp * np.sin(2*np.pi/self.delay_period*t)
 		elif self.delay_shape == "triangle":
-			delay = self.delay_amp * scipy.signal.sawtooth(ang_delay+np.pi/2, 0.5)
+			delay = self.delay_amp * triangle_wave(t, self.delay_period)
+			#delay = self.delay_amp *scipy.signal.sawtooth(2*np.pi/self.delay_period*t+np.pi/2,0.5)
 		else: raise ValueError("Unrecognized delay shape '%s'" % self.delay_shape)
-		return bunch.Bunch(ctime=ctime, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, ang_delay=ang_delay, delay=delay)
+		return bunch.Bunch(ctime=ctime, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, delay=delay)
 	def calc_orientation(self, elements):
 		"""Compute a rotation matrix representing the orientation of the
 		telescope for the given orbital elements."""
@@ -1480,3 +1480,16 @@ def polar_pad(map, npix):
 def side_pad(map, npix):
 	"""Return map with the left and right extended using cyclical wrapping."""
 	return np.concatenate([map[...,-npix:], map, map[...,:npix]],-1)
+
+def triangle_wave(x, period=1):
+	"""Return a triangle wave with amplitude 1 and the given period."""
+	# This order (rather than x/period%1) gave smaller errors
+	x = x % period / period * 4
+	m1 = x < 1
+	m2 = (x < 3) ^ m1
+	m3 = x >= 3
+	res = x.copy()
+	res[m1] = x[m1]
+	res[m2] = 2-x[m2]
+	res[m3] = x[m3]-4
+	return res
