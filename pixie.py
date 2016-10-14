@@ -46,7 +46,7 @@ class OpticsSim:
 		This version of OpticsSim does not support frequency-dependent beams. This
 		should lead to a large simplification and speedup."""
 		# Pointing
-		self.pointgen      = PointingGenerator(**config.__dict__)
+		self.pointgen      = PointingSim(**config.__dict__)
 		self.sample_period = config.sample_period
 
 		# Frequencies
@@ -401,7 +401,7 @@ def calc_response(gamma, det_resp, same, bsize=0x10000):
 
 ##### Pointing #####
 
-class PointingGenerator:
+class PointingSim:
 	"""This class handles the instrument's pointing, but does not care
 	about details like sampling, signals, or smoothing."""
 	def __init__(self, **kwargs):

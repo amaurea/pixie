@@ -78,7 +78,7 @@ for fname in args.tods[comm.rank::comm.size]:
 	# the pointing, so we have to compute it from the elements
 	e     = tod.elements[:,:10]
 	elem  = bunch.Bunch(ctime=e[0], orbit=e[1], scan=e[2], spin=e[3], delay=e[4])
-	pgen  = pixie.PointingGenerator(**config.__dict__)
+	pgen  = pixie.PointingSim(**config.__dict__)
 	orient= pgen.calc_orientation(elem)
 	point = pgen.calc_pointing(orient, elem.delay, np.array([0,0,0]))
 	phi   = point.angpos[0,0]
