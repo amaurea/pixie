@@ -34,37 +34,37 @@ if args.apply_beam:
 	for i, field in enumerate(fields):
 		print field.name
 		fields[i] = field.to_beam(beam)
-	if False:
-		# We will apply a hardcoded gaussian for now
-		l       = np.arange(beam_lmax+1)
-		beam    = np.exp(-0.5*l*(l+1)*bsigma**2)
-		bmat    = np.zeros((3,3,len(beam)))
-		for i in range(3): bmat[i,i] = beam
-		# Smooth manually using full-sky geometry
-		for field in fields:
-			print field.name
-			# Make sure we have the standard pixel ordering before transforming
-			if field.map.wcs.wcs.cdelt[0] > 0: field.map = field.map[...,:,::-1]
-			if field.map.wcs.wcs.cdelt[1] < 0: field.map = field.map[...,::-1,:]
-			field.map = enmap.samewcs(np.ascontiguousarray(field.map), field.map)
-			minfo = sharp.map_info_clenshaw_curtis(field.map.shape[-2], field.map.shape[-1])
-			ainfo = sharp.alm_info(lmax=beam_lmax)
-			sht   = sharp.sht(minfo, ainfo)
-			alm   = np.zeros((3,ainfo.nelem),dtype=complex)
-			print "T -> alm"
-			sht.map2alm(field.map[:1].reshape(1,-1), alm[:1])
-			print "P -> alm"
-			sht.map2alm(field.map[1:].reshape(2,-1), alm[1:], spin=2)
-			print "lmul"
-			alm   = ainfo.lmul(alm, bmat)
-			# And transform back again
-			print "alm -> T"
-			sht.alm2map(alm[:1], field.map[:1].reshape(1,-1))
-			print "alm -> P"
-			sht.alm2map(alm[1:], field.map[1:].reshape(2,-1), spin=2)
-			# Reapply spline filter
-			print "Prefilter"
-			field.pmap = utils.interpol_prefilter(field.map, order=field.order)
+	#if False:
+	#	# We will apply a hardcoded gaussian for now
+	#	l       = np.arange(beam_lmax+1)
+	#	beam    = np.exp(-0.5*l*(l+1)*bsigma**2)
+	#	bmat    = np.zeros((3,3,len(beam)))
+	#	for i in range(3): bmat[i,i] = beam
+	#	# Smooth manually using full-sky geometry
+	#	for field in fields:
+	#		print field.name
+	#		# Make sure we have the standard pixel ordering before transforming
+	#		if field.map.wcs.wcs.cdelt[0] > 0: field.map = field.map[...,:,::-1]
+	#		if field.map.wcs.wcs.cdelt[1] < 0: field.map = field.map[...,::-1,:]
+	#		field.map = enmap.samewcs(np.ascontiguousarray(field.map), field.map)
+	#		minfo = sharp.map_info_clenshaw_curtis(field.map.shape[-2], field.map.shape[-1])
+	#		ainfo = sharp.alm_info(lmax=beam_lmax)
+	#		sht   = sharp.sht(minfo, ainfo)
+	#		alm   = np.zeros((3,ainfo.nelem),dtype=complex)
+	#		print "T -> alm"
+	#		sht.map2alm(field.map[:1].reshape(1,-1), alm[:1])
+	#		print "P -> alm"
+	#		sht.map2alm(field.map[1:].reshape(2,-1), alm[1:], spin=2)
+	#		print "lmul"
+	#		alm   = ainfo.lmul(alm, bmat)
+	#		# And transform back again
+	#		print "alm -> T"
+	#		sht.alm2map(alm[:1], field.map[:1].reshape(1,-1))
+	#		print "alm -> P"
+	#		sht.alm2map(alm[1:], field.map[1:].reshape(2,-1), spin=2)
+	#		# Reapply spline filter
+	#		print "Prefilter"
+	#		field.pmap = utils.interpol_prefilter(field.map, order=field.order)
 	print "Beam done"
 
 posmap = enmap.posmap(shape, wcs)

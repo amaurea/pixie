@@ -241,7 +241,6 @@ class ReadoutSim:
 		for i, det in enumerate(dets):
 			fres[i] *= det.sigma*(1 + (freqs/det.fknee)**(-det.alpha))**0.5
 		fft.ifft(fres, res, normalize=True)
-		print "DEBUG: Added noise with std", np.std(res)
 		return res
 
 ##### TOD container #####
@@ -1054,7 +1053,6 @@ class SpecInterpol:
 		fstep = 0.5*c/dmax
 		dstep = 0.5*c/fmax
 		nsamp = np.ceil(fmax/fstep)
-		print "nsamp", nsamp
 
 		fwcs  = freq_geometry(fmax, nsamp)
 		freqs = np.arange(nsamp)*fwcs.wcs.cdelt[0]
@@ -1458,6 +1456,25 @@ def fix_drift(d):
 			d.reshape(-1,nt,nspin*ndelay),
 			np.arange(nspin*ndelay)/float(nspin*ndelay),
 			-2).reshape(-1,nt,nspin,ndelay)
+	## Adjust phase to compensate for spin during strokes
+	d  = froll(d, np.arange(ndelay)[(None,)*(d.ndim-1)+(slice(None),)]/float(ndelay),-2)
+	return d
+
+def fix_drift2(d):
+	"""Given d[...,nt,nspin,ndelay], where d represents data changing
+	smoothingly both as a function time and spin in 1 dimension (e.g.
+	between one step in the last axis both t and spin change slightly),
+	shift the array such that the axes become independent in the sense
+	taht t and spin only change when one their respective index changes."""
+	# Adjust phase to compensate for sky motion during a spin
+	nt,nspin,ndelay = d.shape[-3:]
+	d = d.reshape(-1, nt*2, nspin*ndelay/2)
+	x = np.arange(nspin*ndelay/2)/float(nspin*ndelay/2)
+	d1= froll(d, x,   -2)[:,0::2] # even half-spins
+	d2= froll(d, x+1, -2)[:,1::2] # odd  half-spins
+	d[:,0::2] = d1
+	d[:,1::2] = d2
+	d = d.reshape(-1, nt, nspin, ndelay)
 	## Adjust phase to compensate for spin during strokes
 	d  = froll(d, np.arange(ndelay)[(None,)*(d.ndim-1)+(slice(None),)]/float(ndelay),-2)
 	return d

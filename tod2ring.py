@@ -102,12 +102,41 @@ for fname in args.tods[comm.rank::comm.size]:
 		d   = fft.ifft(fd, d, axes=[-1], normalize=True)
 	# Undo the effect of drift in theta and spin during each stroke
 	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
-	d   = pixie.fix_drift(d)
+	#d   = pixie.fix_drift(d)
+	nt,nspin,ndelay = d.shape[-3:]
+	if False:
+		print "Standard"
+		d = pixie.froll(
+				d.reshape(-1,nt,nspin*ndelay),
+				np.arange(nspin*ndelay)/float(nspin*ndelay),
+				-2).reshape(-1,nt,nspin,ndelay)
+	else:
+		print "spin 2"
+		d = d.reshape(-1, nt*2, nspin*ndelay/2)
+		x = np.arange(nspin*ndelay/2)/float(nspin*ndelay/2)
+		d1= pixie.froll(d, x,   -2)[:,0::2] # even half-spins
+		d2= pixie.froll(d, x+1, -2)[:,1::2] # odd  half-spins
+		d[:,0::2] = d1
+		d[:,1::2] = d2
+	d = d.reshape(-1, nt, nspin, ndelay)
+	dump(pre+"_1b",d)
+	## Adjust phase to compensate for spin during strokes
+	d  = pixie.froll(d, np.arange(ndelay)[(None,)*(d.ndim-1)+(slice(None),)]/float(ndelay),-2)
 	dump(pre+"_2", d)
 	# Fourier-decompose the spin. *2 for pol because <sin^2> = 0.5.
 	fd  = fft.rfft(d, axes=[2])/d.shape[2]
 	d   = np.array([fd[:,:,0].real, fd[:,:,2].real*2, fd[:,:,2].imag*2])
 	dump(pre+"_3", d)
+	if False:
+		# Overwrite with copies of first half-stroke
+		n = ndelay/4
+		x = np.linspace(0, 1, n+1, endpoint=False)
+		apod = (1+(x/0.99)**2000)**-1
+		moo = (d[:,:,:,:n+1]-d[:,:,:,n,None])*apod + d[:,:,:,n,None]
+		print apod
+		d[:,:,:,2*n:3*n] = moo[:,:,:,0*n:1*n]
+		d[:,:,:,1*n:2*n] = moo[:,:,:,n:0:-1]
+		d[:,:,:,3*n:4*n] = moo[:,:,:,n:0:-1]
 	# Go from stroke to spectrum. This takes us to W/sr/m^2/Hz
 	d   = fft.rfft(d).real[...,::2]*2/ndelay/dfreq
 	dump(pre+"_4", d)
