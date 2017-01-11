@@ -20,6 +20,9 @@ map_ref = pixie.sim_reference_blackbody(rshape, rwcs)
 extra = { "NAME": "REFERENCE", "BEAM": "NONE", "SPEC": "BLACK" }
 enmap.write_map(args.odir + "/map_ref.fits", map_ref, extra=extra)
 
+#map_ref_test = pixie.sim_reference_blackbody(rshape, rwcs, 19.6)
+#enmap.write_map(args.odir + "/map_ref_test.fits", map_ref_test, extra=extra)
+
 # Then project our dust map onto our target coordinates
 print colors.green + "Projecting dust model" + colors.reset
 heal_dust = pixie.read_healpix(args.idir + "/test_therm_600p0_512_v2.fits")
