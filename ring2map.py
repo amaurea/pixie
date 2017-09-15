@@ -1,4 +1,4 @@
-import numpy as np, argparse, pixie, h5py, enlib.wcs, os
+import numpy as np, argparse, pixie, h5py, enlib.wcs, os, time
 import astropy.io.fits as fitsio
 from enlib import enmap, utils, mpi
 parser = argparse.ArgumentParser()
@@ -16,7 +16,7 @@ comm  = mpi.COMM_WORLD
 hdu   = fitsio.open(args.rings[0])[0]
 wcs   = enlib.wcs.WCS(hdu.header)
 shape = hdu.data.shape
-dtype = np.float32
+dtype = np.float64
 atpole= True
 
 ndet, nfreq, ncomp, ntheta, nphi = shape
@@ -41,8 +41,9 @@ omap = enmap.zeros(oshape, owcs.sub(2), dtype=dtype)
 hits = enmap.zeros([ntheta,nphi])
 
 # Loop through all our rings, and copy over the data
+t0 = time.time()
 for ifile in args.rings[comm.rank::comm.size]:
-	print ifile
+	print "%2d %6.3f %s" % (comm.rank, time.time()-t0, ifile)
 	# Read all detectors
 	m = enmap.read_map(ifile)
 	m = eval("m" + args.dets)
@@ -64,7 +65,6 @@ for ifile in args.rings[comm.rank::comm.size]:
 	#for i in range(nring):
 	#	print "%4d %7.3f %4d %4d" % (i, theta[i], itheta[i], ntheta)
 	#1/0
-	print itheta[0], iphi[0]
 	omap[...,itheta,iphi] += m[...,0]
 	hits[itheta,iphi] += 1
 	# Copy over poles

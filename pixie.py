@@ -46,7 +46,7 @@ class OpticsSim:
 		This version of OpticsSim does not support frequency-dependent beams. This
 		should lead to a large simplification and speedup."""
 		# Pointing
-		self.pointgen      = PointingSim(**config.__dict__)
+		self.pointgen      = PointingSim(config)
 		self.sample_period = config.sample_period
 
 		# Frequencies
@@ -404,22 +404,24 @@ def calc_response(gamma, det_resp, same, bsize=0x10000):
 class PointingSim:
 	"""This class handles the instrument's pointing, but does not care
 	about details like sampling, signals, or smoothing."""
-	def __init__(self, **kwargs):
-		self.delay_amp    = kwargs["delay_amp"]
-		self.delay_period = kwargs["delay_period"]
-		self.delay_shape  = kwargs["delay_shape"]
-		self.delay_phase  = kwargs["delay_phase"]*utils.degree
-		self.spin_period  = kwargs["spin_period"]
-		self.spin_phase   = kwargs["spin_phase"]*utils.degree
-		self.opening_angle= kwargs["opening_angle"]*utils.degree
-		self.scan_period  = kwargs["scan_period"]
-		self.scan_phase   = kwargs["scan_phase"]*utils.degree
-		self.orbit_period = kwargs["orbit_period"]
-		self.orbit_phase  = kwargs["orbit_phase"]*utils.degree
-		self.orbit_step   = kwargs["orbit_step"]
-		self.orbit_step_dur=kwargs["orbit_step_dur"]
-		self.eclip_angle  = kwargs["eclip_angle"]*utils.degree
-		self.ref_ctime    = kwargs["ref_ctime"]
+	def __init__(self, config):
+		self.delay_amp    = config.delay_amp
+		self.delay_jitter = config.delay_jitter
+		self.jitter_model = config.jitter_model
+		self.delay_period = config.delay_period
+		self.delay_shape  = config.delay_shape
+		self.delay_phase  = config.delay_phase*utils.degree
+		self.spin_period  = config.spin_period
+		self.spin_phase   = config.spin_phase*utils.degree
+		self.opening_angle= config.opening_angle*utils.degree
+		self.scan_period  = config.scan_period
+		self.scan_phase   = config.scan_phase*utils.degree
+		self.orbit_period = config.orbit_period
+		self.orbit_phase  = config.orbit_phase*utils.degree
+		self.orbit_step   = config.orbit_step
+		self.orbit_step_dur=config.orbit_step_dur
+		self.eclip_angle  = config.eclip_angle*utils.degree
+		self.ref_ctime    = config.ref_ctime
 	def calc_elements(self, ctime):
 		"""Generate orbital elements for each ctime."""
 		t     = ctime - self.ref_ctime
@@ -448,6 +450,9 @@ class PointingSim:
 			delay = self.delay_amp * triangle_wave(t, self.delay_period)
 			#delay = self.delay_amp *scipy.signal.sawtooth(2*np.pi/self.delay_period*t+np.pi/2,0.5)
 		else: raise ValueError("Unrecognized delay shape '%s'" % self.delay_shape)
+		# Add mirror jitter if needed
+		if self.delay_jitter != 0:
+			delay += sim_jitter(delay.size, t0=t[0], dt=t[1]-t[0], rms=self.delay_jitter, model=self.jitter_model)
 		return bunch.Bunch(ctime=ctime, orbit=ang_orbit, scan=ang_scan, spin=ang_spin, delay=delay)
 	def calc_orientation(self, elements):
 		"""Compute a rotation matrix representing the orientation of the
@@ -1358,7 +1363,7 @@ def sim_source_grid(shape, wcs, spacing=30*utils.degree, amp=1, lat_max=60*utils
 		for theta in np.arange(-lat_max, lat_max+1e-8, spacing):
 			print phi, theta
 			rad = utils.angdist([phi,theta], pos[::-1], zenith=False)
-			ang = phi + theta
+			ang = phi
 			m  += (amp*np.array([1, np.cos(2*ang)*polfrac, np.sin(2*ang)*polfrac]))[:,None,None]*np.exp(-0.5*rad**2/beam_sigma**2)
 	return m
 
@@ -1515,3 +1520,31 @@ def triangle_wave(x, period=1):
 	res[m2] = 2-x[m2]
 	res[m3] = x[m3]-4
 	return res
+
+def sim_jitter(nsamp, t0=0, dt=1e-3, rms=1, model="waves", fmin=0.25, fmax=1e3,
+		nmode=100, alpha=-0.5):
+	if model is "white":
+		# Uncorrelated jitter, where the average over one second
+		# will have the given rms. This means that the jitter this
+		# simulates is larger the shorter the timescale it is simulated
+		# on is, which is not realistic.
+		return np.random.standard_normal(nsamp) * rms * dt**-0.5
+	elif model is "waves":
+		# A deterministic function built from a set of harmonic waves.
+		rng   = np.random.RandomState(1092394123)
+		freqs = np.exp(rng.uniform(np.log(fmin),np.log(fmax),nmode))
+		phases= rng.uniform(0,2*np.pi,nmode)
+		amps  = freqs**alpha
+		amps /= np.sum(amps**2)**0.5
+		# Total power is now 0.5. Make is rms**2 instead
+		amps *= 2**0.5*rms
+		t     = dt + np.arange(nsamp)*dt
+		res = np.zeros(nsamp)
+		for freq, phase, amp in zip(freqs, phases, amps):
+			# The sinc factor should be checked, but it's supposed to
+			# take into account the averaging inside each sample which
+			# damps smaller scales.
+			res += np.sin(2*np.pi*freq*t+phase)*(amp*np.sinc(freq*dt))
+		return res
+	else:
+		raise ValueError("No such jitter model: '%s'" % model)

@@ -57,3 +57,10 @@ enmap.write_map(args.odir + "/map_sgrid.fits", map_sgrid, extra=extra)
 del map_sgrid
 print
 
+print colors.green + "Simulating a single point source" + colors.reset
+beam_fwhm = 1.0
+map_src = pixie.sim_source_grid(shape, wcs, amp=10, beam_sigma=beam_fwhm*utils.fwhm*utils.degree, polfrac=0.01, spacing=10, lat_max=0)
+extra = { "NAME": "SGRID", "BEAM": "GAUSS", "FWHM": beam_fwhm, "SPEC": "GRAY", "TBODY": 10, "BETA": 1.0, "FREF": 100e9, "SUNIT": 1e-20}
+enmap.write_map(args.odir + "/map_src.fits", map_src, extra=extra)
+del map_src
+print

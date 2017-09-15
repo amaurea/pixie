@@ -1,9 +1,12 @@
-import numpy as np, argparse, pixie, h5py, enlib.wcs, os
+import numpy as np, argparse, pixie, h5py, enlib.wcs, os, time
 from enlib import enmap, utils, fft, mpi, bunch
 parser = argparse.ArgumentParser()
 parser.add_argument("tods", nargs="+")
 parser.add_argument("odir")
 parser.add_argument("-C", "--config", type=str, default=None)
+parser.add_argument("-B", "--barrel-mode", type=str, default="single")
+parser.add_argument("-s", "--spin",  type=int, default=2)
+parser.add_argument("-n", "--noise", type=str, default=None)
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -69,8 +72,9 @@ def change_horn(horn_old, horn_new, data):
 	if horn_old != horn_new: res[:,0] *= -1
 	return res
 
+t0 = time.time()
 for fname in args.tods[comm.rank::comm.size]:
-	print fname
+	print "%2d %6.3f %s" % (comm.rank, time.time()-t0,fname)
 	# Read the tod. tod.signal has units W/sr/m^2.
 	tod = pixie.read_tod(fname, nsamp=nsamp)
 	pre = args.odir + "/" + os.path.basename(fname)[:-4]
@@ -78,20 +82,24 @@ for fname in args.tods[comm.rank::comm.size]:
 	# the pointing, so we have to compute it from the elements
 	e     = tod.elements[:,:10]
 	elem  = bunch.Bunch(ctime=e[0], orbit=e[1], scan=e[2], spin=e[3], delay=e[4])
-	pgen  = pixie.PointingSim(**config.__dict__)
+	pgen  = pixie.PointingSim(config)
 	orient= pgen.calc_orientation(elem)
 	point = pgen.calc_pointing(orient, elem.delay, np.array([0,0,0]))
 	phi   = point.angpos[0,0]
 	wcs.wcs.crpix[0] = 1 - phi/utils.degree/wcs.wcs.cdelt[0]
 	# Deconvolve time filter. This has almost no effect
 	readout_sim = pixie.ReadoutSim(config)
+	if args.noise == "add":
+		tod.signal += readout_sim.gen_noise(tod.nsamp)
+	elif args.noise == "replace":
+		tod.signal[:] = readout_sim.gen_noise(tod.nsamp)
 	tod.signal = readout_sim.apply_filters(tod.signal, exp=-1)
 	# Detector measures 1/4 of the signal due to how the interferrometry
 	# is set up.
 	gain  = 1.0/4
 	# Get out tod samples
 	d   = tod.signal / gain
-	dump(pre+"_1", d)
+	#dump(pre+"_1", d)
 	# Deconvolve the sample window. Each of our samples
 	# is approximately the integral of the signal inside its
 	# duration. If subsample_num is 1, then we assume the
@@ -104,29 +112,29 @@ for fname in args.tods[comm.rank::comm.size]:
 	d   = d.reshape(d.shape[0], ntheta, nspin, ndelay)
 	#d   = pixie.fix_drift(d)
 	nt,nspin,ndelay = d.shape[-3:]
-	if False:
-		print "Standard"
+	if args.spin == 1:
 		d = pixie.froll(
 				d.reshape(-1,nt,nspin*ndelay),
 				np.arange(nspin*ndelay)/float(nspin*ndelay),
 				-2).reshape(-1,nt,nspin,ndelay)
-	else:
-		print "spin 2"
+	elif args.spin == 2:
 		d = d.reshape(-1, nt*2, nspin*ndelay/2)
 		x = np.arange(nspin*ndelay/2)/float(nspin*ndelay/2)
 		d1= pixie.froll(d, x,   -2)[:,0::2] # even half-spins
 		d2= pixie.froll(d, x+1, -2)[:,1::2] # odd  half-spins
 		d[:,0::2] = d1
 		d[:,1::2] = d2
+	else:
+		raise NotImplementedError("Only spin 1 and 2 shifting are implemented")
 	d = d.reshape(-1, nt, nspin, ndelay)
-	dump(pre+"_1b",d)
+	#dump(pre+"_1b",d)
 	## Adjust phase to compensate for spin during strokes
 	d  = pixie.froll(d, np.arange(ndelay)[(None,)*(d.ndim-1)+(slice(None),)]/float(ndelay),-2)
-	dump(pre+"_2", d)
+	#dump(pre+"_2", d)
 	# Fourier-decompose the spin. *2 for pol because <sin^2> = 0.5.
 	fd  = fft.rfft(d, axes=[2])/d.shape[2]
 	d   = np.array([fd[:,:,0].real, fd[:,:,2].real*2, fd[:,:,2].imag*2])
-	dump(pre+"_3", d)
+	#dump(pre+"_3", d)
 	if False:
 		# Overwrite with copies of first half-stroke
 		n = ndelay/4
@@ -139,11 +147,11 @@ for fname in args.tods[comm.rank::comm.size]:
 		d[:,:,:,3*n:4*n] = moo[:,:,:,n:0:-1]
 	# Go from stroke to spectrum. This takes us to W/sr/m^2/Hz
 	d   = fft.rfft(d).real[...,::2]*2/ndelay/dfreq
-	dump(pre+"_4", d)
+	#dump(pre+"_4", d)
 	# Unapply the frequency filter
 	freqs = np.arange(d.shape[-1])*dfreq
 	d  /= filter(freqs)
-	dump(pre+"_5", d)
+	#dump(pre+"_5", d)
 	# Reorder from [stokes,det,theta,phi,freq] to [det,freq,stokes,theta,phi]
 	d   = d[:,:,:,None,:]
 	d   = utils.moveaxes(d, (1,4,0,2,3), (0,1,2,3,4))
@@ -151,6 +159,10 @@ for fname in args.tods[comm.rank::comm.size]:
 	for di, det in enumerate(dets):
 		d[di] = change_response(det.response, [1,1,0], d[di])
 		d[di] = change_horn(det.horn, 0, d[di])
+	# If we are in double barrel mode, then we're seeing
+	# the sky double up. Compensate for this.
+	if args.barrel_mode == "double":
+		d /= 2
 	# Output as a ring file
 	m   = enmap.enmap(d, wcs, copy=False)
 	enmap.write_map(pre + ".fits", m)
